@@ -1,6 +1,6 @@
 # Minecraft Offline-Session Launcher
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Problem Statement
 
@@ -85,7 +85,7 @@ Deliver an amd64 Debian package with a desktop-menu entry and bundled Python and
 - Use one primary test seam: the launcher application exercised through its packaged desktop interface on the supported Ubuntu target. The user already approved this packaged-app journey during planning, establishing the requested agreement on the seam.
 - Good tests assert external behavior, persisted outcomes, actual game-process behavior, and player-data isolation. Avoid tests coupled to private methods, class organization, or exact third-party call sequences.
 - Cover desktop interaction, application operations, persistence, installation/runtime integration, lifecycle, and diagnostics through the same player-facing flows where practical. Use narrower integration checks only when needed to make failure scenarios deterministic.
-- There is no application implementation, existing test suite, or existing test seam in this repo. Prior art consists of the nine packaged-app acceptance scenarios agreed during the interview; these are expanded below.
+- At test-planning time there was no application implementation, existing test suite, or existing test seam in this repo. The nine packaged-app acceptance scenarios agreed during the interview are expanded below.
 - On a clean Ubuntu 24.04 x86-64 system, install and open the package graphically without separately installing Python or Java. Verify the desktop entry and first-run flow.
 - Save a username, create an instance, install the current stable Minecraft release and managed runtime, observe progress, and launch the real game.
 - Interrupt installation and retry. Verify completed verified downloads are reused, worlds are preserved, and incomplete instances cannot be launched as ready.
@@ -110,10 +110,16 @@ Deliver an amd64 Debian package with a desktop-menu entry and bundled Python and
 
 ## Further Notes
 
-- Published to the configured local Markdown tracker as ready-for-agent. This spec supersedes the interview draft; publication does not mean implementation or acceptance testing has occurred.
-- The repository currently contains agent configuration, engineering skills, a domain glossary, and this specification. It has no application code or existing domain ADR constraining this work.
+- Initially published to the configured local Markdown tracker as ready-for-agent. Implementation and automated verification are complete; packaged-app evidence and remaining player-acceptance gaps are recorded in Issues 01–10.
+- The original repository contained agent configuration, engineering skills, a domain glossary, and this specification, with no application code or existing domain ADR constraining the implementation.
 - Use the glossary's distinctions between instance, offline session, local player identity, vanilla Minecraft, and managed Java runtime.
 - [minecraft-launcher-lib installation documentation](https://minecraft-launcher-lib.readthedocs.io/en/stable/modules/install.html) describes progress callbacks and repair. Verify the integration preserves offline launching rather than assuming installation/repair calls need no network.
 - [minecraft-launcher-lib getting-started documentation](https://minecraft-launcher-lib.readthedocs.io/en/stable/tutorial/getting_started.html) presents generated test identities for development/testing and warns about public launchers enabling unpurchased play. Do not treat its tutorial helper as a supported production account model. Verify intended local-session compatibility against the target release; this spec neither adds Microsoft sign-in nor establishes distribution rights.
 - [Qt for Python deployment documentation](https://doc.qt.io/qtforpython-6/deployment/index.html) describes desktop bundling. Verify the actual package on the agreed Ubuntu baseline and include required third-party notices.
 - Exact dependency versions, identity encoding, memory-allocation formula, storage layout, and bundling tool are implementation choices constrained by the agreed behavior, not additional confirmed product decisions.
+
+## Comments
+
+### Implementation and acceptance record
+
+Final verification (2026-10-18): Ubuntu 24.04 amd64; package mclauncher 0.1.0; SHA-256 304b83ef03b02316b74aa6840d84609b5f5ee3ffb599c695e2c387dd0a253dfb (44,064,956 bytes); Python 3.12.3 build; PySide6 6.12.0; minecraft-launcher-lib 8.0; Nuitka 4.1.1. The exact package was rebuilt reproducibly and its hash matches the artifact installed in the clean Ubuntu 24.04 test container. The package installed and opened graphically without system Python or Java; username AcceptanceUser and instance Acceptance were saved, and Minecraft 26.3 plus managed Java reached ready state. With the network disconnected, the correct Play button started the packaged game using its managed Java runtime, saved local identity, and instance directory. The process exited after Minecraft 26.3 failed to create a renderer under Xvfb (no matching GLX visual; Vulkan surface extension unavailable), even though Mesa llvmpipe OpenGL 4.5 was available. The profile-service lookup also failed offline without blocking JVM startup. No menu/world creation or save/reopen was verified. Native desktop graphics, retry/recovery demonstrations, multi-instance world separation, external-install preservation, and remaining real-player flows still need acceptance. Automated suite: 41 passed; compileall, shell syntax, git diff check, and desktop-file validation passed.

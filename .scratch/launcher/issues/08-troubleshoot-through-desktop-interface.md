@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Play an installed instance offline.
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Show readable installation, launch, and unexpected game-exit messages with available recovery guidance.
 - [ ] Offer Open instance folder for the selected instance and open the location containing its player data.
@@ -12,3 +12,7 @@
 - [ ] Include useful launcher and game failure context in the exported log, including relevant version and instance information.
 - [ ] Keep crash diagnosis and log export usable after the game process exits.
 - [ ] Test installation failure, launch failure, game crash, folder selection, and successful/failed log export through application-visible outcomes; demonstrate the diagnostic flow.
+
+## Comments
+
+Implementation and automated coverage are included in the passing suite. This packaged run did not manually exercise error recovery, opening the instance folder, or successful/failed diagnostic export.

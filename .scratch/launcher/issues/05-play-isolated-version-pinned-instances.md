@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Play an installed instance offline.
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Create, list, persist, and select multiple named instances, with actions applying to the selected instance.
 - [ ] Keep worlds, game settings, and screenshots separate between instances and from existing Minecraft installations.
@@ -13,3 +13,7 @@
 - [ ] Reuse the saved local username and deterministic identity consistently across instances.
 - [ ] Test version changes using controlled release metadata, verify isolation through player-visible outcomes, and demonstrate saving and reopening distinct worlds in two instances.
 - [ ] Verify a pre-existing external Minecraft installation remains unchanged.
+
+## Comments
+
+Implementation and automated coverage are included in the passing suite. The packaged journey used one instance; separate real worlds, changed-release behavior, and preservation of a pre-existing external installation were not demonstrated in this run.
