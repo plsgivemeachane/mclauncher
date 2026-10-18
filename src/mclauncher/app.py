@@ -5,7 +5,7 @@ import re
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -15,12 +15,14 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .persistence import LauncherStore
+from .installer import MinecraftInstaller
 
 
 def local_identity(username: str) -> str:
@@ -30,10 +32,13 @@ def local_identity(username: str) -> str:
 
 
 class LauncherWindow(QMainWindow):
-    def __init__(self, data_root: Path | str | None = None) -> None:
+    def __init__(self, data_root: Path | str | None = None, installer=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
+        self.installer = installer or MinecraftInstaller()
+        self.install_worker = None
+        self.installing_instance = None
         self.state = self.store.load()
         self._build_ui()
         self._restore_state()
@@ -88,6 +93,14 @@ class LauncherWindow(QMainWindow):
         self.instance_status_label = QLabel("No instance selected")
         self.instance_status_label.setObjectName("instanceStatusLabel")
         layout.addWidget(self.instance_status_label)
+        self.install_button = QPushButton("Install Minecraft")
+        self.install_button.setObjectName("installButton")
+        self.install_button.clicked.connect(self._install_selected_instance)
+        layout.addWidget(self.install_button)
+        self.install_progress = QProgressBar()
+        self.install_progress.setObjectName("installProgress")
+        self.install_progress.setRange(0, 100)
+        layout.addWidget(self.install_progress)
         self.setCentralWidget(root)
 
     def _restore_state(self) -> None:
@@ -153,12 +166,108 @@ class LauncherWindow(QMainWindow):
     def _select_instance(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
             self.instance_status_label.setText("No instance selected")
+            self.install_button.setEnabled(False)
             return
-        self.instance_status_label.setText(f"Selected instance: {current.text()}")
+        instance = self._selected_instance()
+        if instance and instance.get("ready"):
+            self.instance_status_label.setText(f"Ready: {current.text()} ({instance.get('version')})")
+        else:
+            self.instance_status_label.setText(f"Selected instance: {current.text()}")
+        self.install_button.setEnabled(self.install_worker is None)
+
+    def _selected_instance(self) -> dict | None:
+        current = self.instance_list.currentItem()
+        if current is None:
+            return None
+        instance_id = current.data(Qt.ItemDataRole.UserRole)
+        return next((instance for instance in self.state["instances"] if instance.get("id") == instance_id), None)
+
+    def _install_selected_instance(self) -> None:
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        self.installing_instance = instance
+        self.install_button.setEnabled(False)
+        self.install_progress.setValue(0)
+        self.instance_status_label.setText(f"Installing {instance['name']}…")
+        self.install_worker = InstallWorker(
+            self.installer,
+            instance,
+            self.store.instance_minecraft_root(instance["id"]),
+            self._persist_version,
+        )
+        self.install_worker.progress.connect(self._show_install_progress)
+        self.install_worker.succeeded.connect(self._installation_succeeded)
+        self.install_worker.failed.connect(self._installation_failed)
+        self.install_worker.finished.connect(self._installation_finished)
+        self.install_worker.start()
+
+    def _persist_version(self, instance: dict, version: str) -> None:
+        instance["version"] = version
+        instance["ready"] = False
+        self.store.save(self.state)
+
+    def _show_install_progress(self, status: str, progress: int, maximum: int) -> None:
+        if status:
+            self.instance_status_label.setText(status)
+        if maximum >= 0:
+            self.install_progress.setMaximum(maximum)
+        if progress >= 0:
+            self.install_progress.setValue(progress)
+
+    def _installation_succeeded(self) -> None:
+        instance = self.installing_instance
+        if instance is None:
+            return
+        instance["ready"] = True
+        self.store.save(self.state)
+        self.instance_status_label.setText(f"Ready: {instance['name']} ({instance['version']})")
+
+    def _installation_failed(self, message: str) -> None:
+        instance = self.installing_instance
+        if instance is not None:
+            instance["ready"] = False
+            self.store.save(self.state)
+        self.instance_status_label.setText(f"Installation failed: {message}")
+
+    def _installation_finished(self) -> None:
+        worker = self.install_worker
+        self.install_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.installing_instance = None
+        self.install_button.setEnabled(self.instance_list.currentItem() is not None)
 
     def closeEvent(self, event) -> None:
         self.store.save(self.state)
         super().closeEvent(event)
+
+
+class InstallWorker(QThread):
+    progress = Signal(str, int, int)
+    succeeded = Signal()
+    failed = Signal(str)
+
+    def __init__(self, installer, instance: dict, minecraft_directory: Path, persist_version) -> None:
+        super().__init__()
+        self.installer = installer
+        self.instance = instance
+        self.minecraft_directory = minecraft_directory
+        self.persist_version = persist_version
+
+    def run(self) -> None:
+        try:
+            if not self.instance.get("version"):
+                self.persist_version(self.instance, self.installer.resolve_version())
+            self.installer.install(
+                self.instance,
+                self.minecraft_directory,
+                self.progress.emit,
+            )
+        except Exception as error:
+            self.failed.emit(str(error) or "unknown installation error")
+        else:
+            self.succeeded.emit()
 
 
 def main() -> int:

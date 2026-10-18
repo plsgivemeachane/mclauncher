@@ -1,1 +1,2 @@
 PySide6==6.10.1
+minecraft-launcher-lib==8.0

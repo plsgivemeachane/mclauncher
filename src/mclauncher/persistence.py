@@ -38,6 +38,15 @@ class LauncherStore:
 
     def create_instance_root(self, instance_id: str) -> Path:
         instance_root = self.instances_root / instance_id
-        for directory in (instance_root, instance_root / "worlds", instance_root / "settings", instance_root / "screenshots"):
+        for directory in (
+            instance_root,
+            instance_root / "minecraft",
+            instance_root / "worlds",
+            instance_root / "settings",
+            instance_root / "screenshots",
+        ):
             directory.mkdir(parents=True, exist_ok=True)
         return instance_root
+
+    def instance_minecraft_root(self, instance_id: str) -> Path:
+        return self.create_instance_root(instance_id) / "minecraft"
