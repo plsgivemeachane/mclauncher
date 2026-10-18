@@ -62,7 +62,14 @@ class MinecraftInstaller:
 class MinecraftPlayer:
     """Build and start a ready instance without performing network work."""
 
-    def build_command(self, instance: dict, minecraft_directory: Path, username: str, player_uuid: str):
+    def build_command(
+        self,
+        instance: dict,
+        minecraft_directory: Path,
+        username: str,
+        player_uuid: str,
+        memory_gib: int | None = None,
+    ):
         version = instance.get("version")
         if not version:
             raise RuntimeError("No Minecraft version is pinned; install the instance first")
@@ -87,11 +94,16 @@ class MinecraftPlayer:
             "launcherName": "mclauncher",
             "launcherVersion": "0.1.0",
         }
+        if memory_gib is not None:
+            options["jvmArguments"] = [f"-Xmx{memory_gib}G", f"-Xms{memory_gib}G"]
         return minecraft_launcher_lib.command.get_minecraft_command(version, minecraft_directory, options), game_directory
 
     def launch(self, instance: dict, minecraft_directory: Path, username: str, player_uuid: str,
-               on_started: Callable[[], None], on_finished: Callable[[int, bool], None]) -> QProcess:
-        command, game_directory = self.build_command(instance, minecraft_directory, username, player_uuid)
+               on_started: Callable[[], None], on_finished: Callable[[int, bool], None],
+               memory_gib: int | None = None) -> QProcess:
+        command, game_directory = self.build_command(
+            instance, minecraft_directory, username, player_uuid, memory_gib
+        )
         process = QProcess()
         process.setProgram(command[0])
         process.setArguments(command[1:])

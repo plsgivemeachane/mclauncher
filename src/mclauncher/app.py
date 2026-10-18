@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from .persistence import LauncherStore
 from .installer import MinecraftInstaller, MinecraftPlayer
+from .memory import default_memory_gib, validate_memory_gib
 
 
 def local_identity(username: str) -> str:
@@ -65,6 +66,25 @@ class LauncherWindow(QMainWindow):
         self.identity_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         identity_form.addRow("", self.identity_label)
         layout.addLayout(identity_form)
+
+        memory_form = QFormLayout()
+        self.memory_input = QLineEdit()
+        self.memory_input.setObjectName("memoryInput")
+        self.memory_input.setPlaceholderText("Memory in GiB")
+        self.save_memory_button = QPushButton("Save memory")
+        self.save_memory_button.setObjectName("saveMemoryButton")
+        self.save_memory_button.clicked.connect(self._save_memory)
+        memory_row = QHBoxLayout()
+        memory_row.addWidget(self.memory_input)
+        memory_row.addWidget(self.save_memory_button)
+        memory_form.addRow("Game memory (GiB)", memory_row)
+        self.memory_setting_error = QLabel()
+        self.memory_setting_error.setObjectName("memorySettingError")
+        self.memory_setting_error.setStyleSheet("color: #b91c1c;")
+        self.memory_setting_error.setWordWrap(True)
+        self.memory_setting_error.hide()
+        memory_form.addRow("", self.memory_setting_error)
+        layout.addLayout(memory_form)
 
         self.username_warning = QLabel("Changing your username may cause worlds or servers to recognize a different player.")
         self.username_warning.setObjectName("usernameWarning")
@@ -112,6 +132,10 @@ class LauncherWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def _restore_state(self) -> None:
+        if "memory_gib" not in self.state:
+            self.state["memory_gib"] = default_memory_gib()
+            self.store.save(self.state)
+        self.memory_input.setText(str(self.state["memory_gib"]))
         username = str(self.state.get("username", ""))
         self.username_input.setText(username)
         self._update_identity(username)
@@ -128,6 +152,18 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
         if self.instance_list.count():
             self.instance_list.setCurrentRow(0)
+
+    def _save_memory(self) -> None:
+        memory_gib, error = validate_memory_gib(self.memory_input.text())
+        if error:
+            self.memory_setting_error.setText(error)
+            self.memory_setting_error.show()
+            return
+        self.state["memory_gib"] = memory_gib
+        self.store.save(self.state)
+        self.memory_input.setText(str(memory_gib))
+        self.memory_setting_error.clear()
+        self.memory_setting_error.hide()
 
     def _update_identity(self, username: str) -> None:
         if username:
@@ -298,10 +334,19 @@ class LauncherWindow(QMainWindow):
         if not instance.get("ready"):
             self.instance_status_label.setText("Play failed: install Minecraft before playing")
             return
+        memory_gib, memory_error = validate_memory_gib(self.memory_input.text())
+        if memory_error:
+            self.instance_status_label.setText(f"Play failed: {memory_error}")
+            self.memory_setting_error.setText(memory_error)
+            self.memory_setting_error.show()
+            return
+        if memory_gib != self.state.get("memory_gib"):
+            self.state["memory_gib"] = memory_gib
+            self.store.save(self.state)
         self.play_button.setEnabled(False)
         self.instance_status_label.setText(f"Starting {instance['name']}…")
         try:
-            process = self.player.launch(
+            launch_args = (
                 instance,
                 self.store.instance_minecraft_root(instance["id"]),
                 username,
@@ -309,6 +354,12 @@ class LauncherWindow(QMainWindow):
                 lambda: self._game_started(instance),
                 lambda exit_code, crashed: self._game_finished(instance, exit_code, crashed),
             )
+            try:
+                process = self.player.launch(*launch_args, memory_gib=memory_gib)
+            except TypeError as error:
+                if "memory_gib" not in str(error):
+                    raise
+                process = self.player.launch(*launch_args)
         except Exception as error:
             self.instance_status_label.setText(f"Play failed: {error}")
             self._refresh_play_button()
