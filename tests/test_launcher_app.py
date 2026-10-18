@@ -207,6 +207,94 @@ def test_retry_uses_persisted_version_without_resolving_again(tmp_path):
     application.processEvents()
 
 
+class IsolatedWorldPlayer(FakePlayer):
+    """A player seam that records the game data it would expose to Minecraft."""
+
+    def launch(self, instance, minecraft_directory, username, player_uuid, on_started, on_finished):
+        process = super().launch(
+            instance,
+            minecraft_directory,
+            username,
+            player_uuid,
+            on_started,
+            on_finished,
+        )
+        game_directory = minecraft_directory.parent
+        world_name = instance["name"].lower()
+        (game_directory / "saves" / world_name).mkdir(parents=True, exist_ok=True)
+        (game_directory / "options.txt").write_text(f"{world_name}-settings", encoding="utf-8")
+        (game_directory / "screenshots").mkdir(exist_ok=True)
+        (game_directory / "screenshots" / f"{world_name}.png").write_bytes(b"screenshot")
+        return process
+
+
+def test_multiple_instances_route_install_and_play_to_selected_isolated_data(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    installer = FakeInstaller(version="1.21.4")
+    player = IsolatedWorldPlayer()
+    root = tmp_path / "launcher-data"
+    external = tmp_path / ".minecraft"
+    external.mkdir()
+    external_marker = external / "options.txt"
+    external_marker.write_text("keep-me", encoding="utf-8")
+    window = LauncherWindow(data_root=root, installer=installer, player=player)
+    window.show()
+    window.username_input.setText("Alex")
+    window.save_username_button.click()
+    for name in ("Creative", "Survival"):
+        window.instance_name_input.setText(name)
+        window.create_instance_button.click()
+        window.install_button.click()
+        wait_for_install(application, window)
+
+    assert window.instance_list.count() == 2
+    instances = {instance["name"]: instance for instance in window.state["instances"]}
+    assert {instance["version"] for instance in instances.values()} == {"1.21.4"}
+
+    window.instance_list.setCurrentRow(0)
+    window.play_button.click()
+    player.finish()
+    window.instance_list.setCurrentRow(1)
+    window.play_button.click()
+    player.finish()
+
+    creative_root = window.store.instance_root(instances["Creative"]["id"])
+    survival_root = window.store.instance_root(instances["Survival"]["id"])
+    assert creative_root != survival_root
+    assert (creative_root / "saves" / "creative").is_dir()
+    assert (survival_root / "saves" / "survival").is_dir()
+    assert (creative_root / "options.txt").read_text(encoding="utf-8") == "creative-settings"
+    assert (survival_root / "options.txt").read_text(encoding="utf-8") == "survival-settings"
+    assert (creative_root / "screenshots" / "creative.png").is_file()
+    assert (survival_root / "screenshots" / "survival.png").is_file()
+    assert external_marker.read_text(encoding="utf-8") == "keep-me"
+    window.close()
+    application.processEvents()
+
+
+def test_existing_instance_stays_pinned_when_new_release_is_available(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    root = tmp_path / "launcher-data"
+    first_installer = FakeInstaller(version="1.21.4")
+    first = LauncherWindow(data_root=root, installer=first_installer)
+    first.show()
+    first.instance_name_input.setText("Pinned")
+    first.create_instance_button.click()
+    first.install_button.click()
+    wait_for_install(application, first)
+    first.close()
+
+    newer_installer = FakeInstaller(version="1.22.0")
+    second = LauncherWindow(data_root=root, installer=newer_installer, player=FakePlayer())
+    second.show()
+    assert second.state["instances"][0]["version"] == "1.21.4"
+    assert newer_installer.resolve_calls == 0
+    second.install_button.click()
+    wait_for_install(application, second)
+    assert second.state["instances"][0]["version"] == "1.21.4"
+    assert newer_installer.resolve_calls == 0
+
+
 def test_failed_install_survives_restart_and_explicit_retry_preserves_player_data(tmp_path):
     application = QApplication.instance() or QApplication([])
     root = tmp_path / "launcher-data"
