@@ -30,6 +30,18 @@ class FakeInstaller:
         return self.version
 
 
+class RecoveringInstaller(FakeInstaller):
+    def __init__(self, *, version="1.21.4"):
+        super().__init__(version=version)
+        self.attempt = 0
+
+    def install(self, instance, minecraft_directory, on_progress):
+        self.attempt += 1
+        super().install(instance, minecraft_directory, on_progress)
+        if self.attempt == 1:
+            raise RuntimeError("download interrupted")
+
+
 class FakePlayer:
     def __init__(self, error=None):
         self.error = error
@@ -281,6 +293,71 @@ def test_existing_instance_stays_pinned_when_new_release_is_available(tmp_path):
     wait_for_install(application, second)
     assert second.state["instances"][0]["version"] == "1.21.4"
     assert newer_installer.resolve_calls == 0
+
+
+def test_failed_install_survives_restart_and_explicit_retry_preserves_player_data(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    root = tmp_path / "launcher-data"
+    first_installer = FakeInstaller(error="download failed")
+    first = LauncherWindow(data_root=root, installer=first_installer)
+    first.show()
+    first.instance_name_input.setText("Survival")
+    first.create_instance_button.click()
+    instance_id = first.state["instances"][0]["id"]
+    worlds = first.store.instance_root(instance_id) / "worlds"
+    marker = worlds / "keep.txt"
+    marker.write_text("player progress", encoding="utf-8")
+
+    first.install_button.click()
+    wait_for_install(application, first)
+    assert first.install_button.text() == "Retry installation"
+    first.close()
+
+    retry_installer = RecoveringInstaller(version="1.22")
+    second = LauncherWindow(data_root=root, installer=retry_installer)
+    second.show()
+    assert retry_installer.calls == []
+    assert second.state["instances"][0]["version"] == "1.21.4"
+    assert second.state["instances"][0]["ready"] is False
+    assert "download failed" in second.instance_status_label.text()
+    assert second.install_button.text() == "Retry installation"
+    second.install_button.click()
+    wait_for_install(application, second)
+
+    assert retry_installer.resolve_calls == 0
+    assert retry_installer.observed_versions == ["1.21.4"]
+    assert second.state["instances"][0]["ready"] is False
+    assert marker.read_text(encoding="utf-8") == "player progress"
+    second.install_button.click()
+    wait_for_install(application, second)
+    assert second.state["instances"][0]["ready"] is True
+    assert marker.read_text(encoding="utf-8") == "player progress"
+    second.close()
+    application.processEvents()
+
+
+def test_interrupted_install_is_unready_after_restart_until_retry(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    root = tmp_path / "launcher-data"
+    first_installer = FakeInstaller()
+    first = LauncherWindow(data_root=root, installer=first_installer)
+    first.show()
+    first.instance_name_input.setText("Survival")
+    first.create_instance_button.click()
+    instance = first.state["instances"][0]
+    instance["version"] = "1.21.4"
+    instance["ready"] = False
+    instance["install_state"] = "installing"
+    first.store.save(first.state)
+    first.close()
+
+    restarted_installer = FakeInstaller()
+    second = LauncherWindow(data_root=root, installer=restarted_installer)
+    second.show()
+    assert restarted_installer.calls == []
+    assert second.state["instances"][0]["ready"] is False
+    assert "interrupted" in second.instance_status_label.text().lower()
+    assert second.install_button.text() == "Retry installation"
     second.close()
     application.processEvents()
 
