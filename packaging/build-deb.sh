@@ -81,6 +81,19 @@ mkdir -p "$ROOTFS/usr/lib/mclauncher" "$ROOTFS/usr/bin" \
   "$ROOTFS/usr/share/applications" "$ROOTFS/usr/share/doc/$PACKAGE" \
   "$ROOTFS/DEBIAN"
 cp -a "$(dirname -- "$BIN")/." "$ROOTFS/usr/lib/mclauncher/"
+VERSION_SOURCE=$(find "$BUILD/venv/lib" -type f \
+  -path '*/site-packages/minecraft_launcher_lib/version.txt' -print -quit)
+if [ -z "$VERSION_SOURCE" ]; then
+  echo "error: pinned minecraft-launcher-lib build is missing version.txt" >&2
+  exit 1
+fi
+VERSION_DEST="$ROOTFS/usr/lib/mclauncher/minecraft_launcher_lib/version.txt"
+mkdir -p "$(dirname -- "$VERSION_DEST")"
+cp "$VERSION_SOURCE" "$VERSION_DEST"
+if [ ! -f "$VERSION_DEST" ]; then
+  echo "error: package rootfs is missing minecraft_launcher_lib/version.txt" >&2
+  exit 1
+fi
 # Keep both Qt's Wayland and XCB platform plugins. Ubuntu 24.04 GNOME commonly
 # runs native Wayland sessions, while XCB remains the fallback for XWayland
 # and other desktop environments. EGLFS is not a desktop target.
@@ -204,4 +217,5 @@ dpkg-deb --contents "$OUT/${PACKAGE}_${APP_VERSION}_${ARCH}.deb" > "$OUT/package
 file "$OUT/${PACKAGE}_${APP_VERSION}_${ARCH}.deb" | grep -q 'Debian binary package'
 grep -q 'usr/share/applications/mclauncher.desktop' "$OUT/package-contents.txt"
 grep -q 'usr/share/doc/mclauncher/copyright' "$OUT/package-contents.txt"
+grep -q 'usr/lib/mclauncher/minecraft_launcher_lib/version.txt' "$OUT/package-contents.txt"
 echo "Built $OUT/${PACKAGE}_${APP_VERSION}_${ARCH}.deb"
