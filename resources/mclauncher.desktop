@@ -3,5 +3,6 @@ Type=Application
 Name=Minecraft Launcher
 Comment=Play Minecraft Java Edition in offline sessions
 Exec=mclauncher
+TryExec=mclauncher
 Icon=application-x-executable
 Categories=Game;
