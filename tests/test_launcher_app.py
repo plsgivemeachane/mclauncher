@@ -305,7 +305,7 @@ def test_player_build_command_uses_pinned_identity_runtime_and_instance_director
     assert game_directory == tmp_path
     assert captured["options"]["username"] == "Alex"
     assert captured["options"]["uuid"] == local_identity("Alex")
-    assert captured["options"]["token"] == local_identity("Alex")
+    assert captured["options"]["token"] == ""
     assert captured["options"]["executablePath"] == str(executable)
     assert captured["options"]["gameDirectory"] == str(tmp_path)
 

@@ -79,7 +79,9 @@ class MinecraftPlayer:
         options = {
             "username": username,
             "uuid": player_uuid,
-            "token": player_uuid,
+            # minecraft-launcher-lib requires this field even for a local session.
+            # An empty token deliberately does not claim authenticated access.
+            "token": "",
             "executablePath": executable,
             "gameDirectory": str(game_directory),
             "launcherName": "mclauncher",
