@@ -49,7 +49,7 @@ class FakePlayer:
         self.process = None
         self.on_finished = None
 
-    def launch(self, instance, minecraft_directory, username, player_uuid, on_started, on_finished):
+    def launch(self, instance, minecraft_directory, username, player_uuid, on_started, on_finished, memory_gib=None):
         self.calls.append((instance["id"], minecraft_directory, username, player_uuid))
         if self.error:
             raise RuntimeError(self.error)
@@ -210,7 +210,7 @@ def test_retry_uses_persisted_version_without_resolving_again(tmp_path):
 class IsolatedWorldPlayer(FakePlayer):
     """A player seam that records the game data it would expose to Minecraft."""
 
-    def launch(self, instance, minecraft_directory, username, player_uuid, on_started, on_finished):
+    def launch(self, instance, minecraft_directory, username, player_uuid, on_started, on_finished, memory_gib=None):
         process = super().launch(
             instance,
             minecraft_directory,
@@ -218,6 +218,7 @@ class IsolatedWorldPlayer(FakePlayer):
             player_uuid,
             on_started,
             on_finished,
+            memory_gib,
         )
         game_directory = minecraft_directory.parent
         world_name = instance["name"].lower()
@@ -572,4 +573,3 @@ def test_player_build_command_uses_pinned_identity_runtime_and_instance_director
     assert captured["options"]["token"] == ""
     assert captured["options"]["executablePath"] == str(executable)
     assert captured["options"]["gameDirectory"] == str(tmp_path)
-

@@ -75,7 +75,7 @@ class MinecraftPlayer:
         if not version:
             raise RuntimeError("No Minecraft version is pinned; install the instance first")
         version_root = minecraft_directory / "versions" / version
-        if not (version_root / f"{version}.json").is_file() or not (version_root / f"{version}.jar").is_file():
+        if not self.is_ready(instance, minecraft_directory):
             raise RuntimeError("Minecraft files are incomplete; install or retry before playing")
         runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(version, minecraft_directory)
         if not runtime_info or not runtime_info.get("name"):
@@ -99,6 +99,20 @@ class MinecraftPlayer:
             options["jvmArguments"] = [f"-Xmx{memory_gib}G", f"-Xms{memory_gib}G"]
         return minecraft_launcher_lib.command.get_minecraft_command(version, minecraft_directory, options), game_directory
 
+    @staticmethod
+    def is_ready(instance: dict, minecraft_directory: Path) -> bool:
+        version = instance.get("version")
+        if not version:
+            return False
+        version_root = minecraft_directory / "versions" / version
+        if not (version_root / f"{version}.json").is_file() or not (version_root / f"{version}.jar").is_file():
+            return False
+        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(version, minecraft_directory)
+        if not runtime_info or not runtime_info.get("name"):
+            return False
+        executable = minecraft_launcher_lib.runtime.get_executable_path(runtime_info["name"], minecraft_directory)
+        return bool(executable and os.path.isfile(executable) and os.access(executable, os.X_OK))
+
     def launch(self, instance: dict, minecraft_directory: Path, username: str, player_uuid: str,
                on_started: Callable[[], None], on_finished: Callable[[int, bool], None],
                memory_gib: int | None = None) -> "DetachedMinecraftProcess":
@@ -116,14 +130,21 @@ class DetachedMinecraftProcess(QObject):
     def __init__(self, command, working_directory: Path, on_finished: Callable[[int, bool], None]) -> None:
         super().__init__()
         try:
-            self._process = subprocess.Popen(
-                command,
-                cwd=str(working_directory),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            log_directory = working_directory / "logs"
+            log_directory.mkdir(parents=True, exist_ok=True)
+            self._log_file = (log_directory / "minecraft.log").open("ab")
+            try:
+                self._process = subprocess.Popen(
+                    command,
+                    cwd=str(working_directory),
+                    stdin=subprocess.DEVNULL,
+                    stdout=self._log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except OSError:
+                self._log_file.close()
+                raise
         except OSError:
             raise
         self._on_finished = on_finished
@@ -142,4 +163,5 @@ class DetachedMinecraftProcess(QObject):
             return
         self._finished_reported = True
         self._poll_timer.stop()
+        self._log_file.close()
         self._on_finished(return_code, return_code != 0)

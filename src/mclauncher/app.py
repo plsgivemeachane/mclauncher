@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,6 +95,18 @@ class LauncherWindow(QMainWindow):
         memory_form.addRow("", self.memory_setting_error)
         layout.addLayout(memory_form)
 
+        self.state_recovery_label = QLabel()
+        self.state_recovery_label.setObjectName("stateRecoveryLabel")
+        self.state_recovery_label.setWordWrap(True)
+        self.state_recovery_label.setStyleSheet("color: #b91c1c;")
+        self.state_recovery_label.hide()
+        self.recover_state_button = QPushButton("Recover defaults after backup")
+        self.recover_state_button.setObjectName("recoverStateButton")
+        self.recover_state_button.clicked.connect(self._recover_state)
+        self.recover_state_button.hide()
+        layout.addWidget(self.state_recovery_label)
+        layout.addWidget(self.recover_state_button)
+
         self.username_warning = QLabel("Changing your username may cause worlds or servers to recognize a different player.")
         self.username_warning.setObjectName("usernameWarning")
         self.username_warning.setWordWrap(True)
@@ -160,7 +171,17 @@ class LauncherWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def _restore_state(self) -> None:
-        if "memory_gib" not in self.state:
+        if self.store.recovery_required:
+            self.state_recovery_label.setText(self.store.load_error)
+            self.state_recovery_label.show()
+            self.recover_state_button.show()
+            self.save_username_button.setEnabled(False)
+            self.save_memory_button.setEnabled(False)
+            self.create_instance_button.setEnabled(False)
+            self.install_button.setEnabled(False)
+            self.play_button.setEnabled(False)
+            return
+        if "memory_gib" not in self.state and not self.store.recovery_required:
             self.state["memory_gib"] = default_memory_gib()
             self.store.save(self.state)
         self.memory_input.setText(str(self.state["memory_gib"]))
@@ -176,11 +197,25 @@ class LauncherWindow(QMainWindow):
                     instance["install_error"] = "Installation interrupted; retry to continue"
                     state_changed = True
                 self._add_instance_item(instance)
-        if state_changed:
+        if state_changed and not self.store.recovery_required:
             self.store.save(self.state)
         if self.instance_list.count():
             self.instance_list.setCurrentRow(0)
         self._restore_running_game()
+
+    def _recover_state(self) -> None:
+        self.store.recover_defaults()
+        self.state = self.store.load()
+        self.state["memory_gib"] = default_memory_gib()
+        self.store.save(self.state)
+        self.state_recovery_label.hide()
+        self.recover_state_button.hide()
+        self.save_username_button.setEnabled(True)
+        self.save_memory_button.setEnabled(True)
+        self.create_instance_button.setEnabled(True)
+        self.memory_input.setText(str(self.state.get("memory_gib", default_memory_gib())))
+        self.instance_list.clear()
+        self._refresh_play_button()
 
     def _restore_running_game(self) -> None:
         acquired = self.game_registry.acquire()
@@ -264,8 +299,7 @@ class LauncherWindow(QMainWindow):
         name = self.instance_name_input.text().strip()
         if not name or any(instance.get("name") == name for instance in self.state["instances"]):
             return
-        instance_id = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "instance"
-        instance_id = f"{instance_id}-{uuid.uuid4().hex[:8]}"
+        instance_id = str(uuid.uuid4())
         instance = {"id": instance_id, "name": name, "version": None, "ready": False}
         self.state["instances"].append(instance)
         self.store.create_instance_root(instance_id)
@@ -321,6 +355,11 @@ class LauncherWindow(QMainWindow):
             self.diagnostic_hint_label.setText(f"Could not open instance folder: {folder}")
 
     def _diagnostic_log(self, instance: dict) -> str:
+        log_path = self.store.instance_root(instance["id"]) / "logs" / "minecraft.log"
+        try:
+            log_tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]) or "(empty)"
+        except OSError as error:
+            log_tail = f"(unavailable: {error})"
         lines = [
             "Minecraft Launcher diagnostic log",
             "Launcher version: 0.1.0",
@@ -340,6 +379,9 @@ class LauncherWindow(QMainWindow):
             f"Local username: {self.state.get('username') or 'not saved'}",
             f"Local player identity: {local_identity(self.state['username']) if self.state.get('username') else 'not available'}",
             f"Memory (GiB): {self.state.get('memory_gib', 'unknown')}",
+            f"Minecraft log: {log_path}",
+            "Minecraft log tail (last 40 lines):",
+            log_tail,
         ]
         return "\n".join(lines) + "\n"
 
@@ -449,7 +491,13 @@ class LauncherWindow(QMainWindow):
 
     def _refresh_play_button(self) -> None:
         instance = self._selected_instance()
-        self.play_button.setEnabled(bool(instance and instance.get("ready") and self.game_process is None))
+        ready = bool(instance and instance.get("ready") and self.game_process is None)
+        if ready and hasattr(self.player, "is_ready"):
+            try:
+                ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+            except Exception:
+                ready = False
+        self.play_button.setEnabled(ready)
 
     def _play_selected_instance(self) -> None:
         instance = self._selected_instance()
@@ -493,12 +541,7 @@ class LauncherWindow(QMainWindow):
                 lambda: self._game_started(instance),
                 lambda exit_code, crashed: self._game_finished(instance, exit_code, crashed),
             )
-            try:
-                process = self.player.launch(*launch_args, memory_gib=memory_gib)
-            except TypeError as error:
-                if "memory_gib" not in str(error):
-                    raise
-                process = self.player.launch(*launch_args)
+            process = self.player.launch(*launch_args, memory_gib=memory_gib)
         except Exception as error:
             self.game_registry.release()
             self.instance_status_label.setText(f"Play failed: {error}")
@@ -544,10 +587,11 @@ class LauncherWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.install_worker is not None and self.installing_instance is not None:
-            self.installing_instance["ready"] = False
-            self.installing_instance["install_state"] = "installing"
-            self.installing_instance["install_error"] = "Installation interrupted; retry to continue"
-        self.store.save(self.state)
+            self.instance_status_label.setText("Installation is still running; wait for it to finish before closing.")
+            event.ignore()
+            return
+        if not self.store.recovery_required:
+            self.store.save(self.state)
         self.game_poll_timer.stop()
         if self.game_process is None:
             self.game_registry.clear()
