@@ -13,6 +13,9 @@ PACKAGE=mclauncher
 cleanup_deploy_outputs() {
   rm -rf "$ROOT/packaging/deployment" "$ROOT/packaging/mclauncher.dist" \
     "$ROOT/packaging/entrypoint.dist" "$ROOT/packaging/pysidedeploy.spec"
+  if [ -n "${ROOTFS:-}" ] && [ -d "$ROOTFS" ]; then
+    rm -rf "$ROOTFS"
+  fi
 }
 trap cleanup_deploy_outputs EXIT
 
@@ -69,27 +72,20 @@ if [ -z "$BIN" ]; then
   exit 1
 fi
 
-ROOTFS="$BUILD/rootfs"
+# Keep the package root on a Linux filesystem. WSL-mounted workspaces can
+# report every entry as mode 0777 even after chmod, which makes dpkg-deb reject
+# the control directory. The source and final artifact may still live in the
+# mounted workspace. mktemp keeps cleanup scoped to a fresh build directory.
+ROOTFS=$(mktemp -d "${ROOTFS_TMPDIR:-/tmp}/mclauncher-rootfs.XXXXXX")
 mkdir -p "$ROOTFS/usr/lib/mclauncher" "$ROOTFS/usr/bin" \
   "$ROOTFS/usr/share/applications" "$ROOTFS/usr/share/doc/$PACKAGE" \
   "$ROOTFS/DEBIAN"
 cp -a "$(dirname -- "$BIN")/." "$ROOTFS/usr/lib/mclauncher/"
-# The supported Ubuntu desktop path uses the XCB platform plugin. EGLFS and
-# Wayland integration plugins introduce optional host libraries and are not
-# needed for this package's tested X11 desktop target.
+# Keep both Qt's Wayland and XCB platform plugins. Ubuntu 24.04 GNOME commonly
+# runs native Wayland sessions, while XCB remains the fallback for XWayland
+# and other desktop environments. EGLFS is not a desktop target.
 rm -rf "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/egldeviceintegrations" \
-  "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/wayland-graphics-integration-client" \
-  "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/wayland-decoration-client" \
-  "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/wayland-shell-integration" \
-  "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/platforms/libqwayland-egl.so" \
-  "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/platforms/libqwayland-generic.so" \
   "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/platforms/libqeglfs.so"
-find "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/platforms" \
-  -type f -name 'libqwayland*.so' -delete
-find "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins" -type d -name 'wayland*' \
-  -prune -exec rm -rf {} +
-rm -f "$ROOTFS/usr/lib/mclauncher/libQt6WaylandClient.so.6"
-rm -f "$ROOTFS/usr/lib/mclauncher/libQt6WlShellIntegration.so.6"
 rm -rf "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/printsupport"
 find "$ROOTFS/usr/lib/mclauncher/PySide6/qt-plugins/platforms" -type f \
   \( -name 'libqlinuxfb.so' -o -name 'libqminimal.so' -o -name 'libqoffscreen.so' \
@@ -170,6 +166,36 @@ fi
 exit 0
 EOF
 chmod 0755 "$ROOTFS/DEBIAN/postinst"
+
+# Normalize permissions after all files have been copied into the rootfs.
+# Debian package directories and ordinary files must not inherit permissive
+# modes from a mounted source tree. Only the launcher entry points need the
+# executable bit.
+find "$ROOTFS" -type d -exec chmod 0755 {} +
+find "$ROOTFS" -type f -exec chmod 0644 {} +
+chmod 0755 "$ROOTFS/usr/bin/mclauncher" \
+  "$ROOTFS/usr/lib/mclauncher/mclauncher" \
+  "$ROOTFS/DEBIAN/postinst"
+
+unsafe_dirs=$(find "$ROOTFS" -type d ! -perm 0755 -print)
+if [ -n "$unsafe_dirs" ]; then
+  echo "error: package rootfs contains directories with unsafe modes:" >&2
+  printf '%s\n' "$unsafe_dirs" >&2
+  exit 1
+fi
+unsafe_files=$(find "$ROOTFS" -type f \( \
+  \( ! -path "$ROOTFS/usr/bin/mclauncher" \
+     ! -path "$ROOTFS/usr/lib/mclauncher/mclauncher" \
+     ! -path "$ROOTFS/DEBIAN/postinst" ! -perm 0644 \) -o \
+  \( \( -path "$ROOTFS/usr/bin/mclauncher" -o \
+       -path "$ROOTFS/usr/lib/mclauncher/mclauncher" -o \
+       -path "$ROOTFS/DEBIAN/postinst" \) ! -perm 0755 \) \
+  \) -print)
+if [ -n "$unsafe_files" ]; then
+  echo "error: package rootfs contains files with unsafe modes:" >&2
+  printf '%s\n' "$unsafe_files" >&2
+  exit 1
+fi
 
 find "$ROOTFS" -type f -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
 dpkg-deb --build --root-owner-group "$ROOTFS" "$OUT/${PACKAGE}_${APP_VERSION}_${ARCH}.deb" >/dev/null

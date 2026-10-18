@@ -34,7 +34,8 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src ubuntu:24.04 \
   sh -eu -c 'apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates dpkg-dev file patchelf python3 python3-venv python3-dev \
     build-essential libgl1 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
-    libx11-6 libxkbcommon0 libxkbcommon-x11-0 libgbm1 libbrotli1 \
+    libx11-6 libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 \
+    libwayland-cursor0 libwayland-egl1 libgbm1 libbrotli1 \
     libxcb-cursor0 libxcb-icccm4 libxcb-util1 libxcb-keysyms1 libxcb-image0 \
     libxcb-render-util0 libxcb-shape0 libxcb-randr0 libxcb-xinerama0 \
     libxcb-xkb1 libkrb5-3 libgssapi-krb5-2 && \
