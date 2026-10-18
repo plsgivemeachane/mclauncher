@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Callable
 
 import minecraft_launcher_lib
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QObject, QTimer
 
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -100,16 +101,45 @@ class MinecraftPlayer:
 
     def launch(self, instance: dict, minecraft_directory: Path, username: str, player_uuid: str,
                on_started: Callable[[], None], on_finished: Callable[[int, bool], None],
-               memory_gib: int | None = None) -> QProcess:
+               memory_gib: int | None = None) -> "DetachedMinecraftProcess":
         command, game_directory = self.build_command(
             instance, minecraft_directory, username, player_uuid, memory_gib
         )
-        process = QProcess()
-        process.setProgram(command[0])
-        process.setArguments(command[1:])
-        process.setWorkingDirectory(str(game_directory))
-        process.started.connect(on_started)
-        process.finished.connect(lambda code, status: on_finished(code, status != QProcess.ExitStatus.NormalExit))
-        process.errorOccurred.connect(lambda _error: on_finished(-1, True))
-        process.start()
+        process = DetachedMinecraftProcess(command, game_directory, on_finished)
+        on_started()
         return process
+
+
+class DetachedMinecraftProcess(QObject):
+    """Track a detached game without making its lifetime depend on the window."""
+
+    def __init__(self, command, working_directory: Path, on_finished: Callable[[int, bool], None]) -> None:
+        super().__init__()
+        try:
+            self._process = subprocess.Popen(
+                command,
+                cwd=str(working_directory),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            raise
+        self._on_finished = on_finished
+        self._finished_reported = False
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(100)
+        self._poll_timer.timeout.connect(self._poll)
+        self._poll_timer.start()
+
+    def processId(self) -> int:
+        return self._process.pid
+
+    def _poll(self) -> None:
+        return_code = self._process.poll()
+        if return_code is None or self._finished_reported:
+            return
+        self._finished_reported = True
+        self._poll_timer.stop()
+        self._on_finished(return_code, return_code != 0)
