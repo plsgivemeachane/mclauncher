@@ -10,6 +10,12 @@ MLL_VERSION=${MLL_VERSION:-8.0}
 APP_VERSION=$(PYTHONPATH="$ROOT/src" python3 -c 'from importlib.metadata import version; print(version("mclauncher"))' 2>/dev/null || printf '%s\n' 0.1.0)
 PACKAGE=mclauncher
 
+cleanup_deploy_outputs() {
+  rm -rf "$ROOT/packaging/deployment" "$ROOT/packaging/mclauncher.dist" \
+    "$ROOT/packaging/entrypoint.dist" "$ROOT/packaging/pysidedeploy.spec"
+}
+trap cleanup_deploy_outputs EXIT
+
 case "$(uname -m)" in
   x86_64|amd64) ARCH=amd64 ;;
   *) echo "error: this package is only buildable for amd64" >&2; exit 1 ;;

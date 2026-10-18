@@ -1,0 +1,6 @@
+/dist/
+/.packaging-build/
+/packaging/deployment/
+/packaging/mclauncher.dist/
+/packaging/entrypoint.dist/
+/packaging/pysidedeploy.spec

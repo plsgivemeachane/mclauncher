@@ -21,7 +21,9 @@ SOURCE_DATE_EPOCH=0 packaging/build-deb.sh
 
 The output is `dist/mclauncher_0.1.0_amd64.deb`. Existing files in `dist/` are
 preserved; only this package and its metadata files are replaced. Set `SOURCE_DATE_EPOCH` to a
-release timestamp for a reproducible release build. The script records exact
+release timestamp for stable archive timestamps. Exact byte-for-byte
+reproducibility also requires the pinned build tools, wheel artifacts, compiler,
+and base image to be held constant. The script records exact
 resolved Python package versions in `usr/share/doc/mclauncher/build-info.txt`
 and fails if the build is not amd64.
 
