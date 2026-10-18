@@ -436,6 +436,101 @@ def test_player_exit_is_reported_and_allows_another_launch(tmp_path):
     application.processEvents()
 
 
+def test_installation_failure_explains_retry_recovery(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(
+        data_root=tmp_path / "launcher-data",
+        installer=FakeInstaller(error="managed Java could not be verified"),
+    )
+    window.show()
+    window.instance_name_input.setText("Survival")
+    window.create_instance_button.click()
+    window.install_button.click()
+    wait_for_install(application, window)
+
+    assert "Installation failed" in window.instance_status_label.text()
+    assert "Retry installation" in window.install_button.text()
+    assert "Install Minecraft again" in window.diagnostic_hint_label.text()
+    window.close()
+    application.processEvents()
+
+
+def test_launch_failure_is_saved_for_diagnostics_and_exported(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    window = _ready_window(tmp_path, FakePlayer(error="Minecraft files are incomplete"))[1]
+    output = tmp_path / "launch-failure.log"
+    monkeypatch.setattr(
+        "mclauncher.app.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output), "Diagnostic log (*.log)"),
+    )
+
+    window.play_button.click()
+    window.save_log_button.click()
+
+    assert "Play failed: Minecraft files are incomplete" in window.instance_status_label.text()
+    assert "Saved diagnostic log" in window.diagnostic_hint_label.text()
+    log = output.read_text(encoding="utf-8")
+    assert "Instance: Survival" in log
+    assert "Version: 1.21.4" in log
+    assert "Minecraft files are incomplete" in log
+    window.close()
+    application.processEvents()
+
+
+def test_crash_context_remains_available_after_game_exits(tmp_path, monkeypatch):
+    player = FakePlayer()
+    application, window = _ready_window(tmp_path, player)
+    output = tmp_path / "crash.log"
+    monkeypatch.setattr(
+        "mclauncher.app.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output), "Diagnostic log (*.log)"),
+    )
+
+    window.play_button.click()
+    player.finish(exit_code=1, crashed=True)
+    window.save_log_button.click()
+
+    assert "Game crashed: Survival (exit 1)" == window.instance_status_label.text()
+    assert "Saved diagnostic log" in window.diagnostic_hint_label.text()
+    assert "Game crashed: Survival (exit 1)" in output.read_text(encoding="utf-8")
+    window.close()
+    application.processEvents()
+
+
+def test_open_instance_folder_uses_selected_instance_root(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "launcher-data")
+    window.show()
+    window.instance_name_input.setText("Survival")
+    window.create_instance_button.click()
+    opened = []
+    monkeypatch.setattr("mclauncher.app.QDesktopServices.openUrl", lambda url: opened.append(url) or True)
+
+    window.open_folder_button.click()
+
+    assert len(opened) == 1
+    assert opened[0].toLocalFile() == str(window.store.instance_root(window.state["instances"][0]["id"]))
+    assert "Opened instance folder" in window.diagnostic_hint_label.text()
+    window.close()
+    application.processEvents()
+
+
+def test_diagnostic_export_failure_is_readable(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    window = _ready_window(tmp_path, FakePlayer())[1]
+    target = tmp_path / "missing" / "diagnostic.log"
+    monkeypatch.setattr(
+        "mclauncher.app.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(target), "Diagnostic log (*.log)"),
+    )
+
+    window.save_log_button.click()
+
+    assert "Could not save diagnostic log" in window.diagnostic_hint_label.text()
+    window.close()
+    application.processEvents()
+
+
 def test_player_build_command_uses_pinned_identity_runtime_and_instance_directory(tmp_path, monkeypatch):
     import minecraft_launcher_lib
 

@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -45,6 +48,7 @@ class LauncherWindow(QMainWindow):
         self.game_process = None
         self.game_instance = None
         self.game_record = None
+        self.last_diagnostic_message = ""
         self.game_registry = game_registry or GameProcessRegistry(self.store.root)
         self.game_poll_timer = QTimer(self)
         self.game_poll_timer.setInterval(500)
@@ -121,7 +125,25 @@ class LauncherWindow(QMainWindow):
         layout.addLayout(instance_row)
         self.instance_status_label = QLabel("No instance selected")
         self.instance_status_label.setObjectName("instanceStatusLabel")
+        self.instance_status_label.setWordWrap(True)
         layout.addWidget(self.instance_status_label)
+        self.diagnostic_hint_label = QLabel()
+        self.diagnostic_hint_label.setObjectName("diagnosticHintLabel")
+        self.diagnostic_hint_label.setWordWrap(True)
+        self.diagnostic_hint_label.setStyleSheet("color: #475569;")
+        layout.addWidget(self.diagnostic_hint_label)
+        diagnostics_row = QHBoxLayout()
+        self.open_folder_button = QPushButton("Open instance folder")
+        self.open_folder_button.setObjectName("openFolderButton")
+        self.open_folder_button.clicked.connect(self._open_instance_folder)
+        self.open_folder_button.setEnabled(False)
+        diagnostics_row.addWidget(self.open_folder_button)
+        self.save_log_button = QPushButton("Save diagnostic log")
+        self.save_log_button.setObjectName("saveDiagnosticLogButton")
+        self.save_log_button.clicked.connect(self._save_diagnostic_log)
+        self.save_log_button.setEnabled(False)
+        diagnostics_row.addWidget(self.save_log_button)
+        layout.addLayout(diagnostics_row)
         self.install_button = QPushButton("Install Minecraft")
         self.install_button.setObjectName("installButton")
         self.install_button.clicked.connect(self._install_selected_instance)
@@ -260,19 +282,85 @@ class LauncherWindow(QMainWindow):
     def _select_instance(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
             self.instance_status_label.setText("No instance selected")
+            self.diagnostic_hint_label.clear()
+            self.open_folder_button.setEnabled(False)
+            self.save_log_button.setEnabled(False)
             self.install_button.setEnabled(False)
             self.play_button.setEnabled(False)
             return
         instance = self._selected_instance()
+        self.open_folder_button.setEnabled(instance is not None)
+        self.save_log_button.setEnabled(instance is not None)
         if instance and instance.get("ready"):
             self.instance_status_label.setText(f"Ready: {current.text()} ({instance.get('version')})")
         elif instance and instance.get("install_error"):
             self.instance_status_label.setText(f"Installation failed: {instance['install_error']}")
+            self.diagnostic_hint_label.setText("Install Minecraft again to retry this instance.")
         else:
             self.instance_status_label.setText(f"Selected instance: {current.text()}")
+            self.diagnostic_hint_label.setText(str(instance.get("last_event", "")))
         self.install_button.setEnabled(self.install_worker is None)
         self._refresh_install_button()
         self._refresh_play_button()
+
+    def _record_diagnostic(self, instance: dict | None, message: str) -> None:
+        self.last_diagnostic_message = message
+        if instance is not None:
+            instance["last_event"] = message
+            instance["last_event_at"] = datetime.now(timezone.utc).isoformat()
+            self.store.save(self.state)
+
+    def _open_instance_folder(self) -> None:
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        folder = self.store.instance_root(instance["id"])
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            self.diagnostic_hint_label.setText(f"Opened instance folder: {folder}")
+        else:
+            self.diagnostic_hint_label.setText(f"Could not open instance folder: {folder}")
+
+    def _diagnostic_log(self, instance: dict) -> str:
+        lines = [
+            "Minecraft Launcher diagnostic log",
+            "Launcher version: 0.1.0",
+            f"Generated: {datetime.now(timezone.utc).isoformat()}",
+            f"Launcher data root: {self.store.root}",
+            "",
+            f"Instance: {instance.get('name', 'unknown')}",
+            f"Instance ID: {instance.get('id', 'unknown')}",
+            f"Version: {instance.get('version') or 'not pinned'}",
+            f"Instance folder: {self.store.instance_root(instance['id'])}",
+            f"Ready: {instance.get('ready', False)}",
+            f"Install state: {instance.get('install_state', 'unknown')}",
+            f"Installation error: {instance.get('install_error') or 'none'}",
+            f"Last event: {instance.get('last_event') or 'none'}",
+            f"Last event time: {instance.get('last_event_at') or 'unknown'}",
+            "",
+            f"Local username: {self.state.get('username') or 'not saved'}",
+            f"Local player identity: {local_identity(self.state['username']) if self.state.get('username') else 'not available'}",
+            f"Memory (GiB): {self.state.get('memory_gib', 'unknown')}",
+        ]
+        return "\n".join(lines) + "\n"
+
+    def _save_diagnostic_log(self) -> None:
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save diagnostic log",
+            f"mclauncher-{instance.get('id', 'instance')}.log",
+            "Diagnostic log (*.log);;Text files (*.txt);;All files (*)",
+        )
+        if not filename:
+            return
+        try:
+            Path(filename).write_text(self._diagnostic_log(instance), encoding="utf-8")
+        except OSError as error:
+            self.diagnostic_hint_label.setText(f"Could not save diagnostic log: {error}")
+            return
+        self.diagnostic_hint_label.setText(f"Saved diagnostic log: {filename}")
 
     def _selected_instance(self) -> dict | None:
         current = self.instance_list.currentItem()
@@ -336,8 +424,9 @@ class LauncherWindow(QMainWindow):
             instance["ready"] = False
             instance["install_state"] = "failed"
             instance["install_error"] = message
-            self.store.save(self.state)
+            self._record_diagnostic(instance, f"Installation failed: {message}")
         self.instance_status_label.setText(f"Installation failed: {message}")
+        self.diagnostic_hint_label.setText("Install Minecraft again to retry this instance.")
 
     def _installation_finished(self) -> None:
         worker = self.install_worker
@@ -413,6 +502,8 @@ class LauncherWindow(QMainWindow):
         except Exception as error:
             self.game_registry.release()
             self.instance_status_label.setText(f"Play failed: {error}")
+            self._record_diagnostic(instance, f"Play failed: {error}")
+            self.diagnostic_hint_label.setText("Install or retry this instance, then try Play again.")
             self._refresh_play_button()
             return
         self.game_process = process
@@ -444,8 +535,11 @@ class LauncherWindow(QMainWindow):
         self.game_registry.release()
         if crashed:
             self.instance_status_label.setText(f"Game crashed: {instance['name']} (exit {exit_code})")
+            self.diagnostic_hint_label.setText("Save a diagnostic log or open the instance folder before relaunching.")
         else:
             self.instance_status_label.setText(f"Exited: {instance['name']} (exit {exit_code})")
+            self.diagnostic_hint_label.setText("Save a diagnostic log if you need help with this game exit.")
+        self._record_diagnostic(instance, self.instance_status_label.text())
         self._refresh_play_button()
 
     def closeEvent(self, event) -> None:
