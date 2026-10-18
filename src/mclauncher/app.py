@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from .persistence import LauncherStore
-from .installer import MinecraftInstaller
+from .installer import MinecraftInstaller, MinecraftPlayer
 
 
 def local_identity(username: str) -> str:
@@ -32,13 +32,16 @@ def local_identity(username: str) -> str:
 
 
 class LauncherWindow(QMainWindow):
-    def __init__(self, data_root: Path | str | None = None, installer=None) -> None:
+    def __init__(self, data_root: Path | str | None = None, installer=None, player=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
         self.installer = installer or MinecraftInstaller()
+        self.player = player or MinecraftPlayer()
         self.install_worker = None
         self.installing_instance = None
+        self.game_process = None
+        self.game_instance = None
         self.state = self.store.load()
         self._build_ui()
         self._restore_state()
@@ -101,6 +104,11 @@ class LauncherWindow(QMainWindow):
         self.install_progress.setObjectName("installProgress")
         self.install_progress.setRange(0, 100)
         layout.addWidget(self.install_progress)
+        self.play_button = QPushButton("Play")
+        self.play_button.setObjectName("playButton")
+        self.play_button.clicked.connect(self._play_selected_instance)
+        self.play_button.setEnabled(False)
+        layout.addWidget(self.play_button)
         self.setCentralWidget(root)
 
     def _restore_state(self) -> None:
@@ -167,6 +175,7 @@ class LauncherWindow(QMainWindow):
         if current is None:
             self.instance_status_label.setText("No instance selected")
             self.install_button.setEnabled(False)
+            self.play_button.setEnabled(False)
             return
         instance = self._selected_instance()
         if instance and instance.get("ready"):
@@ -174,6 +183,7 @@ class LauncherWindow(QMainWindow):
         else:
             self.instance_status_label.setText(f"Selected instance: {current.text()}")
         self.install_button.setEnabled(self.install_worker is None)
+        self._refresh_play_button()
 
     def _selected_instance(self) -> dict | None:
         current = self.instance_list.currentItem()
@@ -187,6 +197,7 @@ class LauncherWindow(QMainWindow):
         if instance is None:
             return
         self.installing_instance = instance
+        self.play_button.setEnabled(False)
         self.install_button.setEnabled(False)
         self.install_progress.setValue(0)
         self.instance_status_label.setText(f"Installing {instance['name']}…")
@@ -237,6 +248,60 @@ class LauncherWindow(QMainWindow):
             worker.deleteLater()
         self.installing_instance = None
         self.install_button.setEnabled(self.instance_list.currentItem() is not None)
+        self._refresh_play_button()
+
+    def _refresh_play_button(self) -> None:
+        instance = self._selected_instance()
+        self.play_button.setEnabled(bool(instance and instance.get("ready") and self.game_process is None))
+
+    def _play_selected_instance(self) -> None:
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        if self.game_process is not None:
+            self.instance_status_label.setText("A Minecraft game is already running")
+            return
+        username = str(self.state.get("username", "")).strip()
+        if not username:
+            self.instance_status_label.setText("Play failed: save a local username first")
+            return
+        if not instance.get("ready"):
+            self.instance_status_label.setText("Play failed: install Minecraft before playing")
+            return
+        self.play_button.setEnabled(False)
+        self.instance_status_label.setText(f"Starting {instance['name']}…")
+        try:
+            process = self.player.launch(
+                instance,
+                self.store.instance_minecraft_root(instance["id"]),
+                username,
+                local_identity(username),
+                lambda: self._game_started(instance),
+                lambda exit_code, crashed: self._game_finished(instance, exit_code, crashed),
+            )
+        except Exception as error:
+            self.instance_status_label.setText(f"Play failed: {error}")
+            self._refresh_play_button()
+            return
+        self.game_process = process
+        self.game_instance = instance
+        if self.instance_status_label.text().startswith("Starting"):
+            self._game_started(instance)
+
+    def _game_started(self, instance: dict) -> None:
+        self.instance_status_label.setText(f"Running: {instance['name']}")
+        self.play_button.setEnabled(False)
+
+    def _game_finished(self, instance: dict, exit_code: int, crashed: bool) -> None:
+        if self.game_instance is not None and self.game_instance.get("id") != instance.get("id"):
+            return
+        self.game_process = None
+        self.game_instance = None
+        if crashed:
+            self.instance_status_label.setText(f"Game crashed: {instance['name']} (exit {exit_code})")
+        else:
+            self.instance_status_label.setText(f"Exited: {instance['name']} (exit {exit_code})")
+        self._refresh_play_button()
 
     def closeEvent(self, event) -> None:
         self.store.save(self.state)

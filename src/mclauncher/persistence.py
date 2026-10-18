@@ -50,3 +50,6 @@ class LauncherStore:
 
     def instance_minecraft_root(self, instance_id: str) -> Path:
         return self.create_instance_root(instance_id) / "minecraft"
+
+    def instance_root(self, instance_id: str) -> Path:
+        return self.create_instance_root(instance_id)

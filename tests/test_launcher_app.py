@@ -5,7 +5,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from mclauncher.app import LauncherWindow
+from mclauncher.app import LauncherWindow, local_identity
+from mclauncher.installer import MinecraftPlayer
 
 
 class FakeInstaller:
@@ -25,6 +26,28 @@ class FakeInstaller:
 
     def resolve_version(self):
         return self.version
+
+
+class FakePlayer:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+        self.process = None
+        self.on_finished = None
+
+    def launch(self, instance, minecraft_directory, username, player_uuid, on_started, on_finished):
+        self.calls.append((instance["id"], minecraft_directory, username, player_uuid))
+        if self.error:
+            raise RuntimeError(self.error)
+        self.process = object()
+        self.on_finished = on_finished
+        on_started()
+        return self.process
+
+    def finish(self, exit_code=0, crashed=False):
+        assert self.process is not None
+        self.process = None
+        self.on_finished(exit_code, crashed)
 
 
 def wait_for_install(application, window):
@@ -168,4 +191,121 @@ def test_retry_uses_persisted_version_without_resolving_again(tmp_path):
     assert second.state["instances"][0]["ready"] is True
     second.close()
     application.processEvents()
+
+
+def _ready_window(tmp_path, player):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "launcher-data", player=player)
+    window.show()
+    window.username_input.setText("Alex")
+    window.save_username_button.click()
+    window.instance_name_input.setText("Survival")
+    window.create_instance_button.click()
+    instance = window.state["instances"][0]
+    instance["version"] = "1.21.4"
+    instance["ready"] = True
+    window.store.save(window.state)
+    window._select_instance(window.instance_list.currentItem(), None)
+    return application, window
+
+
+def test_player_launches_ready_instance_offline_with_saved_identity_and_status(tmp_path):
+    player = FakePlayer()
+    application, window = _ready_window(tmp_path, player)
+
+    window.play_button.click()
+
+    assert len(player.calls) == 1
+    instance_id, game_directory, username, player_uuid = player.calls[0]
+    assert instance_id == window.state["instances"][0]["id"]
+    assert game_directory == window.store.instance_minecraft_root(instance_id)
+    assert username == "Alex"
+    assert player_uuid == local_identity("Alex")
+    assert window.instance_status_label.text() == "Running: Survival"
+    assert not window.play_button.isEnabled()
+    window.close()
+    application.processEvents()
+
+
+def test_play_rejects_incomplete_instance_with_recovery_message(tmp_path):
+    player = FakePlayer(error="Minecraft files are incomplete; install or retry before playing")
+    application, window = _ready_window(tmp_path, player)
+
+    window.play_button.click()
+
+    assert window.instance_status_label.text() == (
+        "Play failed: Minecraft files are incomplete; install or retry before playing"
+    )
+    assert window.play_button.isEnabled()
+    window.close()
+    application.processEvents()
+
+
+def test_play_prevents_duplicate_launches_while_game_is_running(tmp_path):
+    player = FakePlayer()
+    application, window = _ready_window(tmp_path, player)
+
+    window.play_button.click()
+    window.play_button.click()
+
+    assert len(player.calls) == 1
+    assert window.instance_status_label.text() == "Running: Survival"
+    window.close()
+    application.processEvents()
+
+
+def test_player_exit_is_reported_and_allows_another_launch(tmp_path):
+    player = FakePlayer()
+    application, window = _ready_window(tmp_path, player)
+
+    window.play_button.click()
+    player.finish()
+
+    assert window.instance_status_label.text() == "Exited: Survival (exit 0)"
+    assert window.play_button.isEnabled()
+    window.close()
+    application.processEvents()
+
+
+def test_player_build_command_uses_pinned_identity_runtime_and_instance_directory(tmp_path, monkeypatch):
+    import minecraft_launcher_lib
+
+    minecraft_directory = tmp_path / "minecraft"
+    version = "1.21.4"
+    version_root = minecraft_directory / "versions" / version
+    version_root.mkdir(parents=True)
+    (version_root / f"{version}.json").write_text("{}", encoding="utf-8")
+    (version_root / f"{version}.jar").write_bytes(b"jar")
+    executable = tmp_path / "java"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    captured = {}
+
+    monkeypatch.setattr(
+        minecraft_launcher_lib.runtime,
+        "get_version_runtime_information",
+        lambda _version, _directory: {"name": "managed-java"},
+    )
+    monkeypatch.setattr(
+        minecraft_launcher_lib.runtime,
+        "get_executable_path",
+        lambda _name, _directory: str(executable),
+    )
+    def fake_get_command(_version, _directory, options):
+        captured["options"] = options
+        return ["java"]
+
+    monkeypatch.setattr(minecraft_launcher_lib.command, "get_minecraft_command", fake_get_command)
+
+    command, game_directory = MinecraftPlayer().build_command(
+        {"version": version}, minecraft_directory, "Alex", local_identity("Alex")
+    )
+
+    assert command == ["java"]
+    assert game_directory == tmp_path
+    assert captured["options"]["username"] == "Alex"
+    assert captured["options"]["uuid"] == local_identity("Alex")
+    assert captured["options"]["token"] == local_identity("Alex")
+    assert captured["options"]["executablePath"] == str(executable)
+    assert captured["options"]["gameDirectory"] == str(tmp_path)
 

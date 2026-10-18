@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 import minecraft_launcher_lib
+from PySide6.QtCore import QProcess
 
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -56,3 +57,45 @@ class MinecraftInstaller:
         executable = minecraft_launcher_lib.runtime.get_executable_path(runtime_info["name"], minecraft_directory)
         if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
             raise RuntimeError("The managed Java runtime is unavailable")
+
+
+class MinecraftPlayer:
+    """Build and start a ready instance without performing network work."""
+
+    def build_command(self, instance: dict, minecraft_directory: Path, username: str, player_uuid: str):
+        version = instance.get("version")
+        if not version:
+            raise RuntimeError("No Minecraft version is pinned; install the instance first")
+        version_root = minecraft_directory / "versions" / version
+        if not (version_root / f"{version}.json").is_file() or not (version_root / f"{version}.jar").is_file():
+            raise RuntimeError("Minecraft files are incomplete; install or retry before playing")
+        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(version, minecraft_directory)
+        if not runtime_info or not runtime_info.get("name"):
+            raise RuntimeError("The managed Java runtime is missing; install or retry before playing")
+        executable = minecraft_launcher_lib.runtime.get_executable_path(runtime_info["name"], minecraft_directory)
+        if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+            raise RuntimeError("The managed Java runtime is unavailable; install or retry before playing")
+        game_directory = minecraft_directory.parent
+        options = {
+            "username": username,
+            "uuid": player_uuid,
+            "token": player_uuid,
+            "executablePath": executable,
+            "gameDirectory": str(game_directory),
+            "launcherName": "mclauncher",
+            "launcherVersion": "0.1.0",
+        }
+        return minecraft_launcher_lib.command.get_minecraft_command(version, minecraft_directory, options), game_directory
+
+    def launch(self, instance: dict, minecraft_directory: Path, username: str, player_uuid: str,
+               on_started: Callable[[], None], on_finished: Callable[[int, bool], None]) -> QProcess:
+        command, game_directory = self.build_command(instance, minecraft_directory, username, player_uuid)
+        process = QProcess()
+        process.setProgram(command[0])
+        process.setArguments(command[1:])
+        process.setWorkingDirectory(str(game_directory))
+        process.started.connect(on_started)
+        process.finished.connect(lambda code, status: on_finished(code, status != QProcess.ExitStatus.NormalExit))
+        process.errorOccurred.connect(lambda _error: on_finished(-1, True))
+        process.start()
+        return process
