@@ -27,6 +27,11 @@ and base image to be held constant. The script records exact
 resolved Python package versions in `usr/share/doc/mclauncher/build-info.txt`
 and fails if the build is not amd64.
 
+`packaging/constraints.txt` pins every Python package used by the build,
+including pip, setuptools, wheel, PySide6, minecraft-launcher-lib, Nuitka, and
+their native build helpers. The script exports `PIP_CONSTRAINT` so the
+`pyside6-deploy`/Nuitka subprocesses use the same locked environment.
+
 For a clean local check:
 
 ```sh

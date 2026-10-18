@@ -41,7 +41,7 @@ def test_game_lock_allows_only_one_launcher_claim(tmp_path):
 def test_launcher_reopens_running_game_and_clears_record_after_exit(tmp_path):
     application = QApplication.instance() or QApplication([])
     data_root = tmp_path / "launcher-data"
-    instance = {"id": "survival", "name": "Survival", "version": "1.21.4", "ready": True}
+    instance = {"id": "survival-12345678", "name": "Survival", "version": "1.21.4", "ready": True}
     data_root.mkdir()
     (data_root / "state.json").write_text(
         json.dumps({"username": "Alex", "memory_gib": 2, "instances": [instance]}), encoding="utf-8"
@@ -52,6 +52,7 @@ def test_launcher_reopens_running_game_and_clears_record_after_exit(tmp_path):
         record = registry.remember(process.pid, instance["id"])
         assert record is not None
         window = LauncherWindow(data_root=data_root)
+        window.player.is_ready = lambda *_args: True
         assert window.instance_status_label.text() == "Running: Survival"
         assert not window.play_button.isEnabled()
 
@@ -73,6 +74,7 @@ def test_closing_launcher_keeps_detached_game_alive_across_reopen(tmp_path):
     application = QApplication.instance() or QApplication([])
     player = MinecraftPlayer()
     player.build_command = lambda *_args, **_kwargs: (["sleep", "30"], tmp_path)
+    player.is_ready = lambda *_args: True
     _, first = _ready_window(tmp_path, player)
 
     first.play_button.click()
@@ -110,4 +112,3 @@ def _ready_window(tmp_path, player):
     window.store.save(window.state)
     window._select_instance(window.instance_list.currentItem(), None)
     return application, window
-

@@ -7,6 +7,7 @@ BUILD="$ROOT/.packaging-build"
 PYTHON_BIN=${PYTHON_BIN:-python3}
 PY_SIDE_VERSION=${PY_SIDE_VERSION:-6.12.0}
 MLL_VERSION=${MLL_VERSION:-8.0}
+CONSTRAINTS="$ROOT/packaging/constraints.txt"
 APP_VERSION=$(PYTHONPATH="$ROOT/src" python3 -c 'from importlib.metadata import version; print(version("mclauncher"))' 2>/dev/null || printf '%s\n' 0.1.0)
 PACKAGE=mclauncher
 
@@ -34,9 +35,12 @@ mkdir -p "$BUILD" "$OUT"
 "$PYTHON_BIN" -m venv "$BUILD/venv"
 # shellcheck disable=SC1091
 . "$BUILD/venv/bin/activate"
-python -m pip install --upgrade --disable-pip-version-check 'pip==25.2' 'setuptools==80.9.0' wheel
+export PIP_CONSTRAINT="$CONSTRAINTS"
+python -m pip install --upgrade --disable-pip-version-check -c "$CONSTRAINTS" \
+  'pip==25.2' 'setuptools==80.9.0' 'wheel==0.48.0'
 python -m pip install --disable-pip-version-check \
-  "PySide6==$PY_SIDE_VERSION" "minecraft-launcher-lib==$MLL_VERSION"
+  -c "$CONSTRAINTS" "PySide6==$PY_SIDE_VERSION" "minecraft-launcher-lib==$MLL_VERSION" \
+  'Nuitka==4.1.1'
 python -m pip install --no-deps .
 
 rm -rf "$BUILD/frozen" "$BUILD/pysidedeploy.spec" "$BUILD/entrypoint.dist" \

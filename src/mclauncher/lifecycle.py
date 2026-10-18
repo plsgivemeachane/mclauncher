@@ -98,4 +98,3 @@ class GameProcessRegistry:
         if record is not None:
             self.clear()
         return None
-
