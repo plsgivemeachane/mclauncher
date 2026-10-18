@@ -115,9 +115,17 @@ class LauncherWindow(QMainWindow):
         username = str(self.state.get("username", ""))
         self.username_input.setText(username)
         self._update_identity(username)
+        state_changed = False
         for instance in self.state.get("instances", []):
             if isinstance(instance, dict) and instance.get("name") and instance.get("id"):
+                if instance.get("install_state") == "installing":
+                    instance["install_state"] = "interrupted"
+                    instance["ready"] = False
+                    instance["install_error"] = "Installation interrupted; retry to continue"
+                    state_changed = True
                 self._add_instance_item(instance)
+        if state_changed:
+            self.store.save(self.state)
         if self.instance_list.count():
             self.instance_list.setCurrentRow(0)
 
@@ -180,9 +188,12 @@ class LauncherWindow(QMainWindow):
         instance = self._selected_instance()
         if instance and instance.get("ready"):
             self.instance_status_label.setText(f"Ready: {current.text()} ({instance.get('version')})")
+        elif instance and instance.get("install_error"):
+            self.instance_status_label.setText(f"Installation failed: {instance['install_error']}")
         else:
             self.instance_status_label.setText(f"Selected instance: {current.text()}")
         self.install_button.setEnabled(self.install_worker is None)
+        self._refresh_install_button()
         self._refresh_play_button()
 
     def _selected_instance(self) -> dict | None:
@@ -197,6 +208,10 @@ class LauncherWindow(QMainWindow):
         if instance is None:
             return
         self.installing_instance = instance
+        instance["install_state"] = "installing"
+        instance["install_error"] = ""
+        instance["ready"] = False
+        self.store.save(self.state)
         self.play_button.setEnabled(False)
         self.install_button.setEnabled(False)
         self.install_progress.setValue(0)
@@ -216,6 +231,7 @@ class LauncherWindow(QMainWindow):
     def _persist_version(self, instance: dict, version: str) -> None:
         instance["version"] = version
         instance["ready"] = False
+        instance["install_state"] = "installing"
         self.store.save(self.state)
 
     def _show_install_progress(self, status: str, progress: int, maximum: int) -> None:
@@ -231,6 +247,8 @@ class LauncherWindow(QMainWindow):
         if instance is None:
             return
         instance["ready"] = True
+        instance["install_state"] = "ready"
+        instance["install_error"] = ""
         self.store.save(self.state)
         self.instance_status_label.setText(f"Ready: {instance['name']} ({instance['version']})")
 
@@ -238,6 +256,8 @@ class LauncherWindow(QMainWindow):
         instance = self.installing_instance
         if instance is not None:
             instance["ready"] = False
+            instance["install_state"] = "failed"
+            instance["install_error"] = message
             self.store.save(self.state)
         self.instance_status_label.setText(f"Installation failed: {message}")
 
@@ -248,7 +268,17 @@ class LauncherWindow(QMainWindow):
             worker.deleteLater()
         self.installing_instance = None
         self.install_button.setEnabled(self.instance_list.currentItem() is not None)
+        self._refresh_install_button()
         self._refresh_play_button()
+
+    def _refresh_install_button(self) -> None:
+        instance = self._selected_instance()
+        if instance is None:
+            self.install_button.setText("Install Minecraft")
+        elif instance.get("install_error") or instance.get("install_state") == "interrupted":
+            self.install_button.setText("Retry installation")
+        else:
+            self.install_button.setText("Install Minecraft")
 
     def _refresh_play_button(self) -> None:
         instance = self._selected_instance()
@@ -304,6 +334,10 @@ class LauncherWindow(QMainWindow):
         self._refresh_play_button()
 
     def closeEvent(self, event) -> None:
+        if self.install_worker is not None and self.installing_instance is not None:
+            self.installing_instance["ready"] = False
+            self.installing_instance["install_state"] = "installing"
+            self.installing_instance["install_error"] = "Installation interrupted; retry to continue"
         self.store.save(self.state)
         super().closeEvent(event)
 
