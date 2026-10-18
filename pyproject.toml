@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mclauncher"
+version = "0.1.0"
+description = "Minecraft offline-session launcher"
+requires-python = ">=3.11"
+dependencies = ["PySide6==6.10.1"]
+
+[project.scripts]
+mclauncher = "mclauncher.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
