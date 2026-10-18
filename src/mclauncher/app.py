@@ -5,7 +5,7 @@ import re
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from .persistence import LauncherStore
 from .installer import MinecraftInstaller, MinecraftPlayer
 from .memory import default_memory_gib, validate_memory_gib
+from .lifecycle import GameProcessRegistry
 
 
 def local_identity(username: str) -> str:
@@ -33,7 +34,7 @@ def local_identity(username: str) -> str:
 
 
 class LauncherWindow(QMainWindow):
-    def __init__(self, data_root: Path | str | None = None, installer=None, player=None) -> None:
+    def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
@@ -43,6 +44,11 @@ class LauncherWindow(QMainWindow):
         self.installing_instance = None
         self.game_process = None
         self.game_instance = None
+        self.game_record = None
+        self.game_registry = game_registry or GameProcessRegistry(self.store.root)
+        self.game_poll_timer = QTimer(self)
+        self.game_poll_timer.setInterval(500)
+        self.game_poll_timer.timeout.connect(self._poll_adopted_game)
         self.state = self.store.load()
         self._build_ui()
         self._restore_state()
@@ -152,6 +158,42 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
         if self.instance_list.count():
             self.instance_list.setCurrentRow(0)
+        self._restore_running_game()
+
+    def _restore_running_game(self) -> None:
+        acquired = self.game_registry.acquire()
+        record = self.game_registry.adopt() if acquired else self.game_registry.read()
+        if record is None or not self.game_registry.is_alive(record):
+            if acquired:
+                self.game_registry.clear()
+                self.game_registry.release()
+            return
+        self.game_record = record
+        self.game_process = record
+        instance_id = record.get("instance_id")
+        self.game_instance = next(
+            (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
+        )
+        if self.game_instance is not None:
+            self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
+        else:
+            self.instance_status_label.setText("A Minecraft game is already running")
+        self.play_button.setEnabled(False)
+        self.game_poll_timer.start()
+
+    def _poll_adopted_game(self) -> None:
+        if self.game_record is None or self.game_registry.is_alive(self.game_record):
+            return
+        self.game_poll_timer.stop()
+        self.game_registry.clear()
+        self.game_registry.release()
+        instance = self.game_instance
+        self.game_process = None
+        self.game_record = None
+        self.game_instance = None
+        if instance is not None:
+            self.instance_status_label.setText(f"Exited: {instance['name']}")
+        self._refresh_play_button()
 
     def _save_memory(self) -> None:
         memory_gib, error = validate_memory_gib(self.memory_input.text())
@@ -327,15 +369,23 @@ class LauncherWindow(QMainWindow):
         if self.game_process is not None:
             self.instance_status_label.setText("A Minecraft game is already running")
             return
+        if not self.game_registry.acquire():
+            self.instance_status_label.setText("A Minecraft game is already running")
+            self.game_process = self.game_registry.read() or object()
+            self.play_button.setEnabled(False)
+            return
         username = str(self.state.get("username", "")).strip()
         if not username:
+            self.game_registry.release()
             self.instance_status_label.setText("Play failed: save a local username first")
             return
         if not instance.get("ready"):
+            self.game_registry.release()
             self.instance_status_label.setText("Play failed: install Minecraft before playing")
             return
         memory_gib, memory_error = validate_memory_gib(self.memory_input.text())
         if memory_error:
+            self.game_registry.release()
             self.instance_status_label.setText(f"Play failed: {memory_error}")
             self.memory_setting_error.setText(memory_error)
             self.memory_setting_error.show()
@@ -361,11 +411,22 @@ class LauncherWindow(QMainWindow):
                     raise
                 process = self.player.launch(*launch_args)
         except Exception as error:
+            self.game_registry.release()
             self.instance_status_label.setText(f"Play failed: {error}")
             self._refresh_play_button()
             return
         self.game_process = process
         self.game_instance = instance
+        process_id = process.processId() if hasattr(process, "processId") else None
+        if process_id:
+            self.game_record = self.game_registry.remember(process_id, instance["id"])
+            if self.game_record is None:
+                self.game_registry.release()
+                self.instance_status_label.setText("Play failed: could not verify the Minecraft process")
+                self.game_process = None
+                self.game_instance = None
+                self._refresh_play_button()
+                return
         if self.instance_status_label.text().startswith("Starting"):
             self._game_started(instance)
 
@@ -378,6 +439,9 @@ class LauncherWindow(QMainWindow):
             return
         self.game_process = None
         self.game_instance = None
+        self.game_record = None
+        self.game_registry.clear()
+        self.game_registry.release()
         if crashed:
             self.instance_status_label.setText(f"Game crashed: {instance['name']} (exit {exit_code})")
         else:
@@ -390,6 +454,10 @@ class LauncherWindow(QMainWindow):
             self.installing_instance["install_state"] = "installing"
             self.installing_instance["install_error"] = "Installation interrupted; retry to continue"
         self.store.save(self.state)
+        self.game_poll_timer.stop()
+        if self.game_process is None:
+            self.game_registry.clear()
+        self.game_registry.release()
         super().closeEvent(event)
 
 
