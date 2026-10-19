@@ -169,3 +169,70 @@ def test_setup_selection_is_locked_until_failed_preparation_finishes(tmp_path):
     assert window.setup_selector.isEnabled()
     assert window.setup_search_input.isEnabled()
     window.close()
+
+
+def test_preparation_explains_connectivity_requirement_before_download(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    installer = RecoveringInstaller()
+    player = ReadyAfterPreparationPlayer()
+    window = LauncherWindow(data_root=tmp_path / "data", installer=installer, player=player)
+    window.show()
+    wait_until(application, lambda: window.discovery_worker is None)
+    window.username_input.setText("Alex")
+    window.username_input.editingFinished.emit()
+
+    window.play_button.click()
+
+    assert "connect" in window.diagnostic_hint_label.text().lower()
+    assert "prepar" in window.diagnostic_hint_label.text().lower()
+    wait_until(application, lambda: window.install_worker is None)
+    window.close()
+
+
+def test_failure_points_to_retry_on_same_play_button_and_clears_after_recovery(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    installer = RecoveringInstaller()
+    player = ReadyAfterPreparationPlayer()
+    window = LauncherWindow(data_root=tmp_path / "data", installer=installer, player=player)
+    window.show()
+    wait_until(application, lambda: window.discovery_worker is None)
+    window.username_input.setText("Alex")
+    window.username_input.editingFinished.emit()
+
+    window.play_button.click()
+    wait_until(application, lambda: window.install_worker is None)
+
+    assert "Retry" in window.play_button.text()
+    assert "Play" in window.diagnostic_hint_label.text()
+    assert "same" in window.diagnostic_hint_label.text().lower()
+
+    player.ready = True
+    window.play_button.click()
+    wait_until(application, lambda: len(player.launches) == 1 and window.install_worker is None)
+    assert window.diagnostic_hint_label.text() == ""
+    window.close()
+
+
+def test_preparation_failure_remains_available_in_diagnostic_export(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    installer = RecoveringInstaller()
+    player = ReadyAfterPreparationPlayer()
+    window = LauncherWindow(data_root=tmp_path / "data", installer=installer, player=player)
+    window.show()
+    wait_until(application, lambda: window.discovery_worker is None)
+    window.username_input.setText("Alex")
+    window.username_input.editingFinished.emit()
+    window.play_button.click()
+    wait_until(application, lambda: window.install_worker is None)
+
+    output = tmp_path / "diagnostic.log"
+    monkeypatch.setattr(
+        "mclauncher.app.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output), "Diagnostic log (*.log)"),
+    )
+    window._save_diagnostic_log()
+
+    diagnostic = output.read_text(encoding="utf-8")
+    assert "Installation error: download interrupted" in diagnostic
+    assert "Last event: Installation failed: download interrupted" in diagnostic
+    window.close()

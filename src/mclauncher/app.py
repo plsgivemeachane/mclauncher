@@ -855,7 +855,9 @@ class LauncherWindow(QMainWindow):
         self.install_button.setEnabled(False)
         self.setup_selector.setEnabled(False)
         self.setup_search_input.setEnabled(False)
-        self.diagnostic_hint_label.clear()
+        self.diagnostic_hint_label.setText(
+            "Preparing missing Minecraft files and runtime; an internet connection may be required."
+        )
         self.install_progress.setValue(0)
         self.install_progress.setRange(0, 100)
         self.install_progress.show()
@@ -935,7 +937,9 @@ class LauncherWindow(QMainWindow):
         instance["install_error"] = message
         self._record_diagnostic(instance, f"Installation failed: {message}")
         self.instance_status_label.setText(f"Installation failed: {message}")
-        self.diagnostic_hint_label.setText("Install Minecraft again to retry this instance.")
+        self.diagnostic_hint_label.setText(
+            "Press Retry on Play to prepare this setup again with the same pinned version."
+        )
         if self._launch_after_prepare:
             self._launch_after_prepare = False
             self._operation_instance_id = None
