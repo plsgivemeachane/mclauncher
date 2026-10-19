@@ -27,7 +27,16 @@ class LauncherStore:
 
     @staticmethod
     def _defaults() -> dict[str, Any]:
-        return {"username": "", "instances": [], "selected_instance_id": ""}
+        return {
+            "username": "",
+            "instances": [],
+            "selected_instance_id": "",
+            "selected_setup_id": "",
+            "automatic_instances": {},
+            "available_versions": [],
+            "available_version_metadata": [],
+            "show_snapshots": False,
+        }
 
     def _backup_corrupt_state(self) -> Path | None:
         if not self.state_path.exists():
@@ -73,6 +82,15 @@ class LauncherStore:
             for version, instance_id in value.get("automatic_instances", {}).items()
         ):
             return self._invalid_state("automatic_instances must map text versions to text instance ids")
+        if not isinstance(value.get("available_version_metadata", []), list) or any(
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not isinstance(entry.get("type", "release"), str)
+            for entry in value.get("available_version_metadata", [])
+        ):
+            return self._invalid_state("available_version_metadata must contain version records")
+        if not isinstance(value.get("show_snapshots", False), bool):
+            return self._invalid_state("show_snapshots must be a boolean")
         if "memory_gib" in value and (isinstance(value["memory_gib"], bool) or not isinstance(value["memory_gib"], int)):
             return self._invalid_state("memory_gib must be an integer")
         for instance in value.get("instances", []):
@@ -83,6 +101,11 @@ class LauncherStore:
         value.setdefault("username", "")
         value.setdefault("instances", [])
         value.setdefault("selected_instance_id", "")
+        value.setdefault("selected_setup_id", value.get("selected_instance_id", ""))
+        value.setdefault("automatic_instances", {})
+        value.setdefault("available_versions", [])
+        value.setdefault("available_version_metadata", [])
+        value.setdefault("show_snapshots", False)
         return value
 
     def save(self, state: dict[str, Any]) -> None:
