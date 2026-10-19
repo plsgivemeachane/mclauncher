@@ -56,9 +56,17 @@ def test_launcher_surfaces_state_recovery_and_does_not_overwrite_backup(tmp_path
     original = "{not-json"
     (root / "state.json").write_text(original, encoding="utf-8")
     window = LauncherWindow(data_root=root)
+    window.show()
+    app.processEvents()
     assert not window.state_recovery_label.isHidden()
+    assert window.state_recovery_label.isVisible()
+    assert window.recover_state_button.isVisible()
     assert "Recover defaults" in window.state_recovery_label.text()
     assert (root / "state.json").read_text(encoding="utf-8") == original
+    window.recover_state_button.click()
+    assert window.state_recovery_label.isHidden()
+    assert window.recover_state_button.isHidden()
+    assert any(path.read_text(encoding="utf-8") == original for path in root.glob("state.json.corrupt-*"))
     window.close()
     app.processEvents()
 
