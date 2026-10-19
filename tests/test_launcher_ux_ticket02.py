@@ -2,9 +2,35 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from mclauncher.app import LauncherWindow, local_identity
+
+
+def test_launcher_uses_landscape_launch_bar_layout_with_visible_public_controls(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "launcher-data")
+    window.show()
+    application.processEvents()
+
+    assert window.size().width() == 920
+    assert window.size().height() == 560
+    assert window.minimumSize().width() <= 680
+    assert window.minimumSize().height() <= 420
+    assert window.findChild(QLabel, "brandLabel").isVisible()
+    assert window.findChild(QWidget, "landscapePanel").isVisible()
+    assert window.findChild(QWidget, "launchBar").isVisible()
+    assert window.username_input.isVisible()
+    assert window.setup_selector.isVisible()
+    assert window.play_button.isVisible()
+    assert window.settings_button.isVisible()
+    assert not window.instance_list.isVisible()
+    assert not window.install_button.isVisible()
+    assert not window.create_instance_button.isVisible()
+    assert not window.memory_input.isVisible()
+
+    window.close()
+    application.processEvents()
 
 
 def test_existing_named_setups_are_visible_and_selection_is_restored(tmp_path):
