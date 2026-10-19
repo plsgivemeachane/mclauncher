@@ -118,7 +118,7 @@ def test_detached_process_writes_combined_output_to_instance_log(tmp_path):
     assert seen == [(0, False)]
 
 
-def test_ready_flag_alone_does_not_enable_play(tmp_path):
+def test_ready_flag_alone_keeps_recovery_available_through_play(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = LauncherWindow(data_root=tmp_path / "data", player=MinecraftPlayer())
     window.username_input.setText("Alex")
@@ -129,7 +129,7 @@ def test_ready_flag_alone_does_not_enable_play(tmp_path):
     instance.update(version="1.21.4", ready=True)
     window.store.save(window.state)
     window._select_instance(window.instance_list.currentItem(), None)
-    assert not window.play_button.isEnabled()
+    assert window.play_button.isEnabled()
     window.close()
     app.processEvents()
 
