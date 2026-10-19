@@ -19,11 +19,11 @@ class MinecraftInstaller:
         return minecraft_launcher_lib.utils.get_latest_version()["release"]
 
     def discover_versions(self) -> list[dict]:
-        """Return concrete stable choices at the installation boundary."""
+        """Return concrete release and snapshot choices at the installation boundary."""
         return [
             {"id": item["id"], "type": item.get("type", "release")}
             for item in minecraft_launcher_lib.utils.get_version_list()
-            if item.get("type") == "release"
+            if item.get("type") in {"release", "snapshot"}
         ]
 
     def install(

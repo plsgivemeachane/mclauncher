@@ -21,8 +21,13 @@ def test_corrupt_state_is_backed_up_and_requires_explicit_recovery(tmp_path):
         store.save({"username": "lost", "instances": []})
     store.recover_defaults()
     assert json.loads((root / "state.json").read_text()) == {
+        "automatic_instances": {},
+        "available_version_metadata": [],
+        "available_versions": [],
         "instances": [],
         "selected_instance_id": "",
+        "selected_setup_id": "",
+        "show_snapshots": False,
         "username": "",
     }
 
@@ -45,7 +50,16 @@ def test_wrong_state_field_type_is_backed_up(tmp_path):
     (root / "state.json").write_text(json.dumps(original), encoding="utf-8")
     store = LauncherStore(root)
     state = store.load()
-    assert state == {"username": "", "instances": [], "selected_instance_id": ""}
+    assert state == {
+        "automatic_instances": {},
+        "available_version_metadata": [],
+        "available_versions": [],
+        "instances": [],
+        "selected_instance_id": "",
+        "selected_setup_id": "",
+        "show_snapshots": False,
+        "username": "",
+    }
     assert json.loads(next(root.glob("state.json.corrupt-*" )).read_text()) == original
 
 

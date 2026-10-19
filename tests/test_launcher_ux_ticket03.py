@@ -115,7 +115,7 @@ def test_discovery_failure_keeps_existing_setup_playable(tmp_path):
     window = LauncherWindow(data_root=tmp_path / "data", installer=installer, player=player)
     window.show()
     _process(application, window)
-    assert window.setup_selector.itemText(0) == "Survival"
+    assert window.setup_selector.currentText().startswith("Survival · ")
     assert window.play_button.isEnabled()
     window.close()
 
@@ -169,7 +169,8 @@ def test_stable_releases_are_discovered_into_selector_without_creating_instances
     window.show()
     _process(application, window)
 
-    assert [window.setup_selector.itemText(i) for i in range(window.setup_selector.count())] == [
+    assert [window.setup_selector.itemText(i) for i in range(window.setup_selector.count())
+            if window.setup_selector.itemData(i) is not None] == [
         "Minecraft 1.21.4", "Minecraft 1.21.3"
     ]
     assert window.state["instances"] == []
@@ -205,7 +206,7 @@ def test_legacy_state_without_selected_setup_keeps_first_named_setup(tmp_path):
     restored = LauncherWindow(data_root=tmp_path / "data", installer=installer)
     restored.show()
     _process(application, restored)
-    assert restored.setup_selector.currentText() == "Survival"
+    assert restored.setup_selector.currentText().startswith("Survival · ")
     assert restored.state["selected_setup_id"] == "survival-1214-a1b2c3d4"
     restored.close()
 

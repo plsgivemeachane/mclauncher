@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QComboBox,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -171,6 +172,17 @@ class LauncherWindow(QMainWindow):
         controls.setColumnStretch(1, 1)
         controls.setColumnStretch(2, 0)
         launch_layout.addLayout(controls)
+        self.setup_search_input = QLineEdit(launch_bar)
+        self.setup_search_input.setObjectName("setupSearchInput")
+        self.setup_search_input.setPlaceholderText("Search versions and saved setups")
+        self.setup_search_input.setClearButtonEnabled(True)
+        self.setup_search_input.textChanged.connect(self._filter_setup_selector)
+        launch_layout.addWidget(self.setup_search_input)
+        self.selector_empty_label = QLabel(launch_bar)
+        self.selector_empty_label.setObjectName("selectorEmptyLabel")
+        self.selector_empty_label.setText("No matching versions or saved setups")
+        self.selector_empty_label.hide()
+        launch_layout.addWidget(self.selector_empty_label)
         layout.addWidget(launch_bar)
 
         legacy_panel = QWidget(root)
@@ -280,6 +292,7 @@ class LauncherWindow(QMainWindow):
             QLabel#instanceStatusLabel { color: #c2d0c4; font-size: 12px; }
             QLabel#diagnosticHintLabel, QLabel#usernameWarning { color: #e7c17a; font-size: 11px; }
             QLineEdit, QComboBox { background: #252e28; color: #eef3e9; border: 1px solid #3b453d; border-radius: 7px; padding: 8px 13px; min-height: 28px; }
+            QLabel#selectorEmptyLabel { color: #a7b3a9; font-size: 11px; }
             QPushButton { background: transparent; color: #c7d2c9; border: 1px solid transparent; border-radius: 7px; padding: 8px 12px; }
             QPushButton:hover { background: #ffffff10; border-color: #516052; }
             QPushButton#playButton { background: #a6e175; color: #1c2c16; border-color: #b7eb89; font-weight: 750; min-width: 120px; }
@@ -304,6 +317,8 @@ class LauncherWindow(QMainWindow):
         if index < 0 or index >= self.setup_selector.count():
             return
         value = self.setup_selector.itemData(index, Qt.ItemDataRole.UserRole)
+        if value is None:
+            return
         if isinstance(value, str) and value.startswith("version:"):
             version = value.removeprefix("version:")
             self.state["selected_setup_id"] = value
@@ -315,12 +330,12 @@ class LauncherWindow(QMainWindow):
             self._refresh_play_button()
             return
         selector_row = self.setup_selector.findData(value, Qt.ItemDataRole.UserRole)
-        matches = self.instance_list.findItems(
-            next((str(item.get("name")) for item in self.state["instances"] if item.get("id") == value), ""),
-            Qt.MatchFlag.MatchExactly,
+        instance_row = next(
+            (row for row in range(self.instance_list.count())
+             if self.instance_list.item(row).data(Qt.ItemDataRole.UserRole) == value),
+            -1,
         )
-        if selector_row >= 0 and matches:
-            instance_row = self.instance_list.row(matches[0])
+        if selector_row >= 0 and instance_row >= 0:
             self.instance_list.setCurrentRow(instance_row)
             instance = self.state["instances"][instance_row]
             if not getattr(self, "_restoring_state", False) and not self.store.recovery_required:
@@ -339,35 +354,18 @@ class LauncherWindow(QMainWindow):
         self.discovery_worker.start()
 
     def _versions_discovered(self, versions: list) -> None:
-        self.state["available_versions"] = [
-            entry if isinstance(entry, str) else str(entry.get("id", "")) for entry in versions
+        metadata = [
+            {"id": entry, "type": "release"} if isinstance(entry, str)
+            else {"id": str(entry.get("id", "")), "type": str(entry.get("type", "release"))}
+            for entry in versions
         ]
+        metadata = [entry for entry in metadata if entry["id"]]
+        self.state["available_version_metadata"] = metadata
+        self.state["available_versions"] = [entry["id"] for entry in metadata]
         if not self.store.recovery_required:
             self.store.save(self.state)
-        existing = {
-            self.setup_selector.itemData(i, Qt.ItemDataRole.UserRole)
-            for i in range(self.setup_selector.count())
-        }
-        self.setup_selector.blockSignals(True)
-        try:
-            for entry in versions:
-                if isinstance(entry, str):
-                    version_id = entry
-                else:
-                    version_id = str(entry.get("id", ""))
-                if not version_id or f"version:{version_id}" in existing:
-                    continue
-                self.setup_selector.addItem(f"Minecraft {version_id}", f"version:{version_id}")
-        finally:
-            self.setup_selector.blockSignals(False)
         selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
-        if selected:
-            index = self.setup_selector.findData(selected, Qt.ItemDataRole.UserRole)
-            if index >= 0:
-                self.setup_selector.setCurrentIndex(index)
-        elif versions and self.setup_selector.count():
-            index = self.setup_selector.findData(f"version:{versions[0] if isinstance(versions[0], str) else versions[0].get('id')}")
-            self.setup_selector.setCurrentIndex(max(index, 0))
+        self._rebuild_setup_selector(selected=selected)
         self._refresh_play_button()
 
     def _version_discovery_failed(self, message: str) -> None:
@@ -393,6 +391,9 @@ class LauncherWindow(QMainWindow):
         error.hide()
         form.addRow("Game memory (GiB)", memory)
         form.addRow("", error)
+        snapshots = QCheckBox("Show snapshots", dialog)
+        snapshots.setChecked(bool(self.state.get("show_snapshots", False)))
+        form.addRow("Experimental versions", snapshots)
         open_folder = QPushButton("Open selected setup folder", dialog)
         open_folder.clicked.connect(self._open_instance_folder)
         form.addRow("", open_folder)
@@ -414,6 +415,14 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
             error.hide()
 
+        def save_snapshots(enabled: bool) -> None:
+            self.state["show_snapshots"] = bool(enabled)
+            self.store.save(self.state)
+            selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
+            self._rebuild_setup_selector(selected=selected)
+
+        snapshots.toggled.connect(save_snapshots)
+
         memory.editingFinished.connect(save_memory)
         dialog.exec()
 
@@ -433,6 +442,8 @@ class LauncherWindow(QMainWindow):
         self.state.setdefault("selected_setup_id", self.state.get("selected_instance_id", ""))
         self.state.setdefault("automatic_instances", {})
         self.state.setdefault("available_versions", [])
+        self.state.setdefault("available_version_metadata", [])
+        self.state.setdefault("show_snapshots", False)
         if "memory_gib" not in self.state and not self.store.recovery_required:
             self.state["memory_gib"] = default_memory_gib()
             self.store.save(self.state)
@@ -473,14 +484,89 @@ class LauncherWindow(QMainWindow):
         self._restore_running_game()
 
     def _append_cached_versions(self) -> None:
-        existing = {self.setup_selector.itemData(i, Qt.ItemDataRole.UserRole) for i in range(self.setup_selector.count())}
-        self.setup_selector.blockSignals(True)
-        try:
-            for version in self.state.get("available_versions", []):
-                if f"version:{version}" not in existing:
-                    self.setup_selector.addItem(f"Minecraft {version}", f"version:{version}")
-        finally:
+        selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
+        self._rebuild_setup_selector(selected=selected)
+
+    def _version_metadata(self) -> list[dict]:
+        metadata = self.state.get("available_version_metadata", [])
+        if metadata:
+            return metadata
+        return [{"id": value, "type": "release"} for value in self.state.get("available_versions", [])]
+
+    def _rebuild_setup_selector(self, *, selected: str | None = None) -> None:
+        current = selected or self.setup_selector.currentData(Qt.ItemDataRole.UserRole)
+        metadata = self._version_metadata()
+        instances = self.state.get("instances", [])
+        if not metadata and not instances:
+            self.setup_selector.blockSignals(True)
+            self.setup_selector.clear()
             self.setup_selector.blockSignals(False)
+            self.selector_empty_label.hide()
+            return
+        self.setup_selector.blockSignals(True)
+        self.setup_selector.clear()
+        self.setup_selector.addItem("Versions", None)
+        header = self.setup_selector.model().item(0)
+        if header is not None:
+            header.setEnabled(False)
+        for entry in metadata:
+            version = str(entry.get("id", ""))
+            if not version:
+                continue
+            pinned = current == f"version:{version}" or any(
+                instance.get("version") == version for instance in instances
+            )
+            if entry.get("type") != "release" and not self.state.get("show_snapshots", False) and not pinned:
+                continue
+            marker = "✓ " if self._version_is_downloaded(version) else ""
+            self.setup_selector.addItem(f"{marker}Minecraft {version}", f"version:{version}")
+            self.setup_selector.setItemData(self.setup_selector.count() - 1, entry.get("type", "release"), Qt.ItemDataRole.UserRole + 1)
+        self.setup_selector.addItem("Saved setups", None)
+        header = self.setup_selector.model().item(self.setup_selector.count() - 1)
+        if header is not None:
+            header.setEnabled(False)
+        for instance in instances:
+            name = str(instance.get("name", "Unnamed setup"))
+            suffix = f" · {instance.get('id', '')}"
+            self.setup_selector.addItem(f"{name}{suffix}", instance.get("id"))
+        index = self.setup_selector.findData(current, Qt.ItemDataRole.UserRole) if current else -1
+        if index < 0:
+            for row in range(self.setup_selector.count()):
+                if self.setup_selector.itemData(row, Qt.ItemDataRole.UserRole) is not None:
+                    index = row
+                    break
+        if index >= 0:
+            self.setup_selector.setCurrentIndex(index)
+        self.setup_selector.blockSignals(False)
+        self._filter_setup_selector(self.setup_search_input.text())
+
+    def _version_is_downloaded(self, version: str) -> bool:
+        instance_id = self.state.get("automatic_instances", {}).get(version)
+        instance = next((item for item in self.state.get("instances", []) if item.get("id") == instance_id), None)
+        if instance is None or instance.get("version") != version:
+            return False
+        try:
+            return bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+        except Exception:
+            return False
+
+    def _filter_setup_selector(self, text: str) -> None:
+        needle = text.strip().casefold()
+        selected = self.setup_selector.currentData(Qt.ItemDataRole.UserRole)
+        visible = 0
+        for row in range(self.setup_selector.count()):
+            value = self.setup_selector.itemData(row, Qt.ItemDataRole.UserRole)
+            label = self.setup_selector.itemText(row)
+            is_header = value is None
+            matches = not needle or (not is_header and needle in label.casefold())
+            self.setup_selector.view().setRowHidden(row, not matches)
+            if matches and not is_header:
+                visible += 1
+        self.selector_empty_label.setVisible(bool(needle) and visible == 0)
+        if selected:
+            index = self.setup_selector.findData(selected, Qt.ItemDataRole.UserRole)
+            if index >= 0 and not self.setup_selector.view().isRowHidden(index):
+                self.setup_selector.setCurrentIndex(index)
 
     def _recover_state(self) -> None:
         self.store.recover_defaults()
@@ -595,7 +681,7 @@ class LauncherWindow(QMainWindow):
         item = QListWidgetItem(str(instance["name"]))
         item.setData(Qt.ItemDataRole.UserRole, instance["id"])
         self.instance_list.addItem(item)
-        self.setup_selector.addItem(str(instance["name"]), instance["id"])
+        self._rebuild_setup_selector(selected=instance["id"])
 
     def _select_instance(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
