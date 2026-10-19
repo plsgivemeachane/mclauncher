@@ -29,6 +29,14 @@ def test_launcher_uses_landscape_launch_bar_layout_with_visible_public_controls(
     assert not window.create_instance_button.isVisible()
     assert not window.memory_input.isVisible()
 
+    window.resize(680, 420)
+    application.processEvents()
+    assert window.width() >= 680
+    assert window.height() >= 420
+    assert window.username_input.isVisible()
+    assert window.setup_selector.isVisible()
+    assert window.play_button.isVisible()
+
     window.close()
     application.processEvents()
 
