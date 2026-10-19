@@ -89,6 +89,7 @@ class LauncherWindow(QMainWindow):
         self.game_process = None
         self.game_instance = None
         self.game_record = None
+        self.last_game_instance = None
         self.last_diagnostic_message = ""
         self.game_registry = game_registry or GameProcessRegistry(self.store.root)
         self.game_poll_timer = QTimer(self)
@@ -617,6 +618,7 @@ class LauncherWindow(QMainWindow):
         self.game_instance = next(
             (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
         )
+        self.last_game_instance = self.game_instance
         if self.game_instance is not None:
             self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
         else:
@@ -746,7 +748,7 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
 
     def _open_instance_folder(self) -> None:
-        instance = self._selected_instance()
+        instance = self._diagnostic_instance()
         if instance is None:
             return
         folder = self.store.instance_root(instance["id"])
@@ -787,7 +789,7 @@ class LauncherWindow(QMainWindow):
         return "\n".join(lines) + "\n"
 
     def _save_diagnostic_log(self) -> None:
-        instance = self._selected_instance()
+        instance = self._diagnostic_instance()
         if instance is None:
             return
         filename, _ = QFileDialog.getSaveFileName(
@@ -811,6 +813,14 @@ class LauncherWindow(QMainWindow):
             return None
         instance_id = current.data(Qt.ItemDataRole.UserRole)
         return next((instance for instance in self.state["instances"] if instance.get("id") == instance_id), None)
+
+    def _diagnostic_instance(self) -> dict | None:
+        """Keep lifecycle diagnostics attached to the game that produced them."""
+        if self.game_instance is not None:
+            return self.game_instance
+        if self.last_game_instance is not None:
+            return self.last_game_instance
+        return self._selected_instance()
 
     def _selected_version(self) -> str | None:
         value = self.setup_selector.currentData(Qt.ItemDataRole.UserRole)
@@ -1046,6 +1056,7 @@ class LauncherWindow(QMainWindow):
             return
         self.game_process = process
         self.game_instance = instance
+        self.last_game_instance = instance
         process_id = process.processId() if hasattr(process, "processId") else None
         if process_id:
             self.game_record = self.game_registry.remember(process_id, instance["id"])
@@ -1068,6 +1079,7 @@ class LauncherWindow(QMainWindow):
             return
         self.game_process = None
         self.game_instance = None
+        self.last_game_instance = instance
         self.game_record = None
         self.game_registry.clear()
         self.game_registry.release()
