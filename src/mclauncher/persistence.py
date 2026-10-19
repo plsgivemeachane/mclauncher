@@ -27,7 +27,7 @@ class LauncherStore:
 
     @staticmethod
     def _defaults() -> dict[str, Any]:
-        return {"username": "", "instances": []}
+        return {"username": "", "instances": [], "selected_instance_id": ""}
 
     def _backup_corrupt_state(self) -> Path | None:
         if not self.state_path.exists():
@@ -60,6 +60,8 @@ class LauncherStore:
             return self._invalid_state("the top-level value must be an object")
         if not isinstance(value.get("username", ""), str) or not isinstance(value.get("instances", []), list):
             return self._invalid_state("username must be text and instances must be a list")
+        if not isinstance(value.get("selected_instance_id", ""), str):
+            return self._invalid_state("selected_instance_id must be text")
         if "memory_gib" in value and (isinstance(value["memory_gib"], bool) or not isinstance(value["memory_gib"], int)):
             return self._invalid_state("memory_gib must be an integer")
         for instance in value.get("instances", []):
@@ -69,6 +71,7 @@ class LauncherStore:
                 return self._invalid_state(f"unsafe instance id {instance['id']!r}")
         value.setdefault("username", "")
         value.setdefault("instances", [])
+        value.setdefault("selected_instance_id", "")
         return value
 
     def save(self, state: dict[str, Any]) -> None:

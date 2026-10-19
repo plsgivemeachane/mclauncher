@@ -16,6 +16,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QMainWindow,
     QProgressBar,
     QPushButton,
@@ -63,6 +66,7 @@ class LauncherWindow(QMainWindow):
         self.username_input = QLineEdit()
         self.username_input.setObjectName("usernameInput")
         self.username_input.setPlaceholderText("Enter a local username")
+        self.username_input.editingFinished.connect(self._save_username)
         self.save_username_button = QPushButton("Save username")
         self.save_username_button.setObjectName("saveUsernameButton")
         self.save_username_button.clicked.connect(self._save_username)
@@ -119,11 +123,20 @@ class LauncherWindow(QMainWindow):
         layout.addWidget(self.username_warning)
         layout.addWidget(self.confirm_username_change_button)
 
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.clicked.connect(self._open_settings)
+        layout.addWidget(self.settings_button)
+
         layout.addWidget(QLabel("Instances"))
         self.instance_list = QListWidget()
         self.instance_list.setObjectName("instanceList")
         self.instance_list.currentItemChanged.connect(self._select_instance)
         layout.addWidget(self.instance_list)
+        self.setup_selector = QComboBox()
+        self.setup_selector.setObjectName("setupSelector")
+        self.setup_selector.currentIndexChanged.connect(self._select_setup_from_selector)
+        layout.addWidget(self.setup_selector)
         instance_row = QHBoxLayout()
         self.instance_name_input = QLineEdit()
         self.instance_name_input.setObjectName("instanceNameInput")
@@ -169,8 +182,74 @@ class LauncherWindow(QMainWindow):
         self.play_button.setEnabled(False)
         layout.addWidget(self.play_button)
         self.setCentralWidget(root)
+        self._apply_compact_theme()
+
+    def _apply_compact_theme(self) -> None:
+        self.resize(920, 560)
+        self.setMinimumSize(680, 420)
+        self.setStyleSheet("""
+            QWidget { background: #242424; color: #f4eee3; }
+            QLineEdit, QComboBox { background: #303030; color: #f4eee3; border: 1px solid #626262; border-radius: 7px; padding: 8px; }
+            QPushButton { background: #303030; color: #f4eee3; border: 1px solid #626262; border-radius: 7px; padding: 8px 12px; }
+            QPushButton#playButton { background: #4f9d57; border-color: #8bcf8e; font-weight: 700; }
+            QLineEdit:focus, QComboBox:focus, QPushButton:focus { border: 2px solid #9bcf8a; }
+        """)
+        self.instance_list.hide()
+        self.save_username_button.hide()
+        self.save_memory_button.hide()
+        self.identity_label.hide()
+        self.memory_input.hide()
+        self.memory_setting_error.hide()
+        self.username_warning.setStyleSheet("color: #e7c17a;")
+        self.confirm_username_change_button.hide()
+        self.instance_name_input.hide()
+        self.create_instance_button.hide()
+        self.install_button.hide()
+
+    def _select_setup_from_selector(self, index: int) -> None:
+        if index < 0 or index >= self.instance_list.count():
+            return
+        self.instance_list.setCurrentRow(index)
+
+    def _open_settings(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        dialog.setModal(True)
+        form = QFormLayout(dialog)
+        memory = QLineEdit(str(self.state.get("memory_gib", default_memory_gib())), dialog)
+        memory.setObjectName("settingsMemoryInput")
+        error = QLabel(dialog)
+        error.setStyleSheet("color: #ffb4a8;")
+        error.setWordWrap(True)
+        error.hide()
+        form.addRow("Game memory (GiB)", memory)
+        form.addRow("", error)
+        open_folder = QPushButton("Open selected setup folder", dialog)
+        open_folder.clicked.connect(self._open_instance_folder)
+        form.addRow("", open_folder)
+        export_log = QPushButton("Export diagnostic log", dialog)
+        export_log.clicked.connect(self._save_diagnostic_log)
+        form.addRow("", export_log)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        form.addRow(buttons)
+
+        def save_memory() -> None:
+            value, message = validate_memory_gib(memory.text())
+            if message:
+                error.setText(message)
+                error.show()
+                return
+            self.state["memory_gib"] = value
+            self.store.save(self.state)
+            error.hide()
+
+        memory.editingFinished.connect(save_memory)
+        dialog.exec()
 
     def _restore_state(self) -> None:
+        self._restoring_state = True
         if self.store.recovery_required:
             self.state_recovery_label.setText(self.store.load_error)
             self.state_recovery_label.show()
@@ -180,6 +259,7 @@ class LauncherWindow(QMainWindow):
             self.create_instance_button.setEnabled(False)
             self.install_button.setEnabled(False)
             self.play_button.setEnabled(False)
+            self._restoring_state = False
             return
         if "memory_gib" not in self.state and not self.store.recovery_required:
             self.state["memory_gib"] = default_memory_gib()
@@ -200,7 +280,15 @@ class LauncherWindow(QMainWindow):
         if state_changed and not self.store.recovery_required:
             self.store.save(self.state)
         if self.instance_list.count():
-            self.instance_list.setCurrentRow(0)
+            selected_id = self.state.get("selected_instance_id")
+            selected_row = next(
+                (row for row in range(self.instance_list.count())
+                 if self.instance_list.item(row).data(Qt.ItemDataRole.UserRole) == selected_id),
+                0,
+            )
+            self.instance_list.setCurrentRow(selected_row)
+            self.setup_selector.setCurrentIndex(selected_row)
+        self._restoring_state = False
         self._restore_running_game()
 
     def _recover_state(self) -> None:
@@ -215,6 +303,7 @@ class LauncherWindow(QMainWindow):
         self.create_instance_button.setEnabled(True)
         self.memory_input.setText(str(self.state.get("memory_gib", default_memory_gib())))
         self.instance_list.clear()
+        self.setup_selector.clear()
         self._refresh_play_button()
 
     def _restore_running_game(self) -> None:
@@ -272,14 +361,17 @@ class LauncherWindow(QMainWindow):
 
     def _save_username(self) -> None:
         candidate = self.username_input.text().strip()
-        if not candidate or candidate == self.state.get("username", ""):
-            if candidate == self.state.get("username", ""):
-                self.username_input.setText(candidate)
+        if not candidate:
+            self.username_input.setText(str(self.state.get("username", "")))
+            self.username_warning.setText("Enter a username before playing.")
+            self.username_warning.show()
+            return
+        if candidate == self.state.get("username", ""):
+            self.username_warning.hide()
             return
         if self.state.get("username", ""):
+            self.username_warning.setText("Username changed. Offline worlds may recognize a different player.")
             self.username_warning.show()
-            self.confirm_username_change_button.show()
-            return
         self._persist_username(candidate)
 
     def _confirm_username_change(self) -> None:
@@ -312,6 +404,7 @@ class LauncherWindow(QMainWindow):
         item = QListWidgetItem(str(instance["name"]))
         item.setData(Qt.ItemDataRole.UserRole, instance["id"])
         self.instance_list.addItem(item)
+        self.setup_selector.addItem(str(instance["name"]), instance["id"])
 
     def _select_instance(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
@@ -323,6 +416,15 @@ class LauncherWindow(QMainWindow):
             self.play_button.setEnabled(False)
             return
         instance = self._selected_instance()
+        if instance is not None:
+            if not getattr(self, "_restoring_state", False):
+                self.state["selected_instance_id"] = instance["id"]
+            if not self.store.recovery_required and not getattr(self, "_restoring_state", False):
+                self.store.save(self.state)
+            if self.setup_selector.currentIndex() != self.instance_list.currentRow():
+                self.setup_selector.blockSignals(True)
+                self.setup_selector.setCurrentIndex(self.instance_list.currentRow())
+                self.setup_selector.blockSignals(False)
         self.open_folder_button.setEnabled(instance is not None)
         self.save_log_button.setEnabled(instance is not None)
         if instance and instance.get("ready"):
