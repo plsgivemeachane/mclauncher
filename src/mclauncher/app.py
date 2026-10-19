@@ -5,8 +5,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal, QPoint
+from PySide6.QtGui import QDesktopServices, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
+    QGridLayout,
     QMainWindow,
     QProgressBar,
     QPushButton,
@@ -36,6 +38,37 @@ def local_identity(username: str) -> str:
     """Return the stable offline-session identity for a saved username."""
     digest = hashlib.sha256(username.encode("utf-8")).hexdigest()
     return str(uuid.UUID(digest[:32]))
+
+
+class LandscapePanel(QFrame):
+    """Small block landscape that keeps the launch surface visually quiet."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("landscapePanel")
+        self.setMinimumHeight(120)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        width, height = self.width(), self.height()
+        painter.fillRect(self.rect(), "#9bbbaa")
+        painter.fillRect(0, int(height * 0.52), width, int(height * 0.48), "#537d68")
+        painter.fillRect(0, int(height * 0.69), width, int(height * 0.31), "#416750")
+        painter.setPen("#9bbba0")
+        painter.setBrush("#7f9d8c")
+        painter.drawPolygon([QPoint(0, int(height * .55)), QPoint(int(width * .12), int(height * .34)),
+                             QPoint(int(width * .25), int(height * .50)), QPoint(int(width * .39), int(height * .28)),
+                             QPoint(int(width * .56), int(height * .52)), QPoint(int(width * .72), int(height * .32)),
+                             QPoint(width, int(height * .52)), QPoint(width, int(height * .7)), QPoint(0, int(height * .7))])
+        painter.setPen("#5b5840")
+        for x, scale in ((50, 1.0), (150, .7), (width - 120, .8), (width - 45, 1.1)):
+            trunk = max(5, int(10 * scale))
+            painter.drawRect(x - trunk // 2, int(height * .52), trunk, int(height * .25))
+            painter.setBrush("#284d3d")
+            painter.drawRect(x - int(28 * scale), int(height * .34), int(56 * scale), int(30 * scale))
+            painter.drawRect(x - int(20 * scale), int(height * .25), int(40 * scale), int(25 * scale))
+        painter.end()
 
 
 class LauncherWindow(QMainWindow):
@@ -62,23 +95,96 @@ class LauncherWindow(QMainWindow):
     def _build_ui(self) -> None:
         root = QWidget(self)
         layout = QVBoxLayout(root)
-        identity_form = QFormLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame(root)
+        header.setObjectName("titleBar")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(25, 10, 25, 10)
+        brand = QLabel("▦  mclauncher", header)
+        brand.setObjectName("brandLabel")
+        header_layout.addWidget(brand)
+        header_layout.addStretch(1)
+        self.settings_button = QPushButton("⚙  Settings", header)
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.clicked.connect(self._open_settings)
+        header_layout.addWidget(self.settings_button)
+        layout.addWidget(header)
+
+        scene = LandscapePanel(root)
+        layout.addWidget(scene, 1)
+
+        launch_bar = QFrame(root)
+        launch_bar.setObjectName("launchBar")
+        launch_layout = QVBoxLayout(launch_bar)
+        launch_layout.setContentsMargins(26, 16, 26, 20)
+        launch_layout.setSpacing(7)
+
+        self.instance_status_label = QLabel("No saved setup selected", launch_bar)
+        self.instance_status_label.setObjectName("instanceStatusLabel")
+        self.instance_status_label.setWordWrap(True)
+        launch_layout.addWidget(self.instance_status_label)
+        self.diagnostic_hint_label = QLabel(launch_bar)
+        self.diagnostic_hint_label.setObjectName("diagnosticHintLabel")
+        self.diagnostic_hint_label.setWordWrap(True)
+        launch_layout.addWidget(self.diagnostic_hint_label)
+        self.install_progress = QProgressBar(launch_bar)
+        self.install_progress.setObjectName("installProgress")
+        self.install_progress.setRange(0, 100)
+        self.install_progress.setTextVisible(False)
+        self.install_progress.hide()
+        launch_layout.addWidget(self.install_progress)
+
+        controls = QGridLayout()
+        controls.setHorizontalSpacing(15)
+        controls.setVerticalSpacing(5)
+        username_label = QLabel("Username", launch_bar)
+        username_label.setObjectName("usernameFieldLabel")
+        setup_label = QLabel("Saved setup", launch_bar)
+        setup_label.setObjectName("setupFieldLabel")
+        controls.addWidget(username_label, 0, 0)
+        controls.addWidget(setup_label, 0, 1)
         self.username_input = QLineEdit()
         self.username_input.setObjectName("usernameInput")
         self.username_input.setPlaceholderText("Enter a local username")
+        self.username_input.setMinimumHeight(47)
         self.username_input.editingFinished.connect(self._save_username)
+        controls.addWidget(self.username_input, 1, 0)
+        self.setup_selector = QComboBox(launch_bar)
+        self.setup_selector.setObjectName("setupSelector")
+        self.setup_selector.setMinimumHeight(47)
+        self.setup_selector.currentIndexChanged.connect(self._select_setup_from_selector)
+        controls.addWidget(self.setup_selector, 1, 1)
+        self.play_button = QPushButton("▶  Play", launch_bar)
+        self.play_button.setObjectName("playButton")
+        self.play_button.setMinimumHeight(47)
+        self.play_button.clicked.connect(self._play_selected_instance)
+        self.play_button.setEnabled(False)
+        controls.addWidget(self.play_button, 1, 2)
+        controls.setColumnStretch(0, 1)
+        controls.setColumnStretch(1, 1)
+        controls.setColumnStretch(2, 0)
+        launch_layout.addLayout(controls)
+        layout.addWidget(launch_bar)
+
+        legacy_panel = QWidget(root)
+        legacy_layout = QVBoxLayout(legacy_panel)
+        legacy_layout.setContentsMargins(0, 0, 0, 0)
+        legacy_panel.hide()
+
+        identity_form = QFormLayout()
         self.save_username_button = QPushButton("Save username")
         self.save_username_button.setObjectName("saveUsernameButton")
         self.save_username_button.clicked.connect(self._save_username)
         username_row = QHBoxLayout()
-        username_row.addWidget(self.username_input)
         username_row.addWidget(self.save_username_button)
         identity_form.addRow("Local username", username_row)
         self.identity_label = QLabel("Local player identity: not saved")
         self.identity_label.setObjectName("identityLabel")
         self.identity_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         identity_form.addRow("", self.identity_label)
-        layout.addLayout(identity_form)
+        legacy_layout.addLayout(identity_form)
 
         memory_form = QFormLayout()
         self.memory_input = QLineEdit()
@@ -97,7 +203,7 @@ class LauncherWindow(QMainWindow):
         self.memory_setting_error.setWordWrap(True)
         self.memory_setting_error.hide()
         memory_form.addRow("", self.memory_setting_error)
-        layout.addLayout(memory_form)
+        legacy_layout.addLayout(memory_form)
 
         self.state_recovery_label = QLabel()
         self.state_recovery_label.setObjectName("stateRecoveryLabel")
@@ -108,8 +214,8 @@ class LauncherWindow(QMainWindow):
         self.recover_state_button.setObjectName("recoverStateButton")
         self.recover_state_button.clicked.connect(self._recover_state)
         self.recover_state_button.hide()
-        layout.addWidget(self.state_recovery_label)
-        layout.addWidget(self.recover_state_button)
+        launch_layout.insertWidget(0, self.state_recovery_label)
+        launch_layout.insertWidget(1, self.recover_state_button)
 
         self.username_warning = QLabel("Changing your username may cause worlds or servers to recognize a different player.")
         self.username_warning.setObjectName("usernameWarning")
@@ -120,23 +226,13 @@ class LauncherWindow(QMainWindow):
         self.confirm_username_change_button.setObjectName("confirmUsernameChangeButton")
         self.confirm_username_change_button.clicked.connect(self._confirm_username_change)
         self.confirm_username_change_button.hide()
-        layout.addWidget(self.username_warning)
-        layout.addWidget(self.confirm_username_change_button)
+        launch_layout.insertWidget(1, self.username_warning)
+        legacy_layout.addWidget(self.confirm_username_change_button)
 
-        self.settings_button = QPushButton("Settings")
-        self.settings_button.setObjectName("settingsButton")
-        self.settings_button.clicked.connect(self._open_settings)
-        layout.addWidget(self.settings_button)
-
-        layout.addWidget(QLabel("Instances"))
         self.instance_list = QListWidget()
         self.instance_list.setObjectName("instanceList")
         self.instance_list.currentItemChanged.connect(self._select_instance)
-        layout.addWidget(self.instance_list)
-        self.setup_selector = QComboBox()
-        self.setup_selector.setObjectName("setupSelector")
-        self.setup_selector.currentIndexChanged.connect(self._select_setup_from_selector)
-        layout.addWidget(self.setup_selector)
+        legacy_layout.addWidget(self.instance_list)
         instance_row = QHBoxLayout()
         self.instance_name_input = QLineEdit()
         self.instance_name_input.setObjectName("instanceNameInput")
@@ -146,16 +242,7 @@ class LauncherWindow(QMainWindow):
         self.create_instance_button.clicked.connect(self._create_instance)
         instance_row.addWidget(self.instance_name_input)
         instance_row.addWidget(self.create_instance_button)
-        layout.addLayout(instance_row)
-        self.instance_status_label = QLabel("No instance selected")
-        self.instance_status_label.setObjectName("instanceStatusLabel")
-        self.instance_status_label.setWordWrap(True)
-        layout.addWidget(self.instance_status_label)
-        self.diagnostic_hint_label = QLabel()
-        self.diagnostic_hint_label.setObjectName("diagnosticHintLabel")
-        self.diagnostic_hint_label.setWordWrap(True)
-        self.diagnostic_hint_label.setStyleSheet("color: #475569;")
-        layout.addWidget(self.diagnostic_hint_label)
+        legacy_layout.addLayout(instance_row)
         diagnostics_row = QHBoxLayout()
         self.open_folder_button = QPushButton("Open instance folder")
         self.open_folder_button.setObjectName("openFolderButton")
@@ -167,20 +254,12 @@ class LauncherWindow(QMainWindow):
         self.save_log_button.clicked.connect(self._save_diagnostic_log)
         self.save_log_button.setEnabled(False)
         diagnostics_row.addWidget(self.save_log_button)
-        layout.addLayout(diagnostics_row)
+        legacy_layout.addLayout(diagnostics_row)
         self.install_button = QPushButton("Install Minecraft")
         self.install_button.setObjectName("installButton")
         self.install_button.clicked.connect(self._install_selected_instance)
-        layout.addWidget(self.install_button)
-        self.install_progress = QProgressBar()
-        self.install_progress.setObjectName("installProgress")
-        self.install_progress.setRange(0, 100)
-        layout.addWidget(self.install_progress)
-        self.play_button = QPushButton("Play")
-        self.play_button.setObjectName("playButton")
-        self.play_button.clicked.connect(self._play_selected_instance)
-        self.play_button.setEnabled(False)
-        layout.addWidget(self.play_button)
+        legacy_layout.addWidget(self.install_button)
+        layout.addWidget(legacy_panel)
         self.setCentralWidget(root)
         self._apply_compact_theme()
 
@@ -188,11 +267,21 @@ class LauncherWindow(QMainWindow):
         self.resize(920, 560)
         self.setMinimumSize(680, 420)
         self.setStyleSheet("""
-            QWidget { background: #242424; color: #f4eee3; }
-            QLineEdit, QComboBox { background: #303030; color: #f4eee3; border: 1px solid #626262; border-radius: 7px; padding: 8px; }
-            QPushButton { background: #303030; color: #f4eee3; border: 1px solid #626262; border-radius: 7px; padding: 8px 12px; }
-            QPushButton#playButton { background: #4f9d57; border-color: #8bcf8e; font-weight: 700; }
-            QLineEdit:focus, QComboBox:focus, QPushButton:focus { border: 2px solid #9bcf8a; }
+            QWidget { background: #161b19; color: #eef3e9; }
+            QFrame#titleBar { background: #172019; }
+            QLabel#brandLabel { color: #c5cfc7; font-size: 15px; font-weight: 650; }
+            QFrame#launchBar { background: #1b231e; }
+            QLabel#usernameFieldLabel, QLabel#setupFieldLabel { color: #a7b3a9; font-size: 11px; }
+            QLabel#instanceStatusLabel { color: #c2d0c4; font-size: 12px; }
+            QLabel#diagnosticHintLabel, QLabel#usernameWarning { color: #e7c17a; font-size: 11px; }
+            QLineEdit, QComboBox { background: #252e28; color: #eef3e9; border: 1px solid #3b453d; border-radius: 7px; padding: 8px 13px; min-height: 28px; }
+            QPushButton { background: transparent; color: #c7d2c9; border: 1px solid transparent; border-radius: 7px; padding: 8px 12px; }
+            QPushButton:hover { background: #ffffff10; border-color: #516052; }
+            QPushButton#playButton { background: #a6e175; color: #1c2c16; border-color: #b7eb89; font-weight: 750; min-width: 120px; }
+            QPushButton#playButton:disabled { background: #35452f; color: #a9c597; border-color: #53664a; }
+            QLineEdit:focus, QComboBox:focus, QPushButton:focus { border: 2px solid #a6e175; }
+            QProgressBar { background: #3a473c; border: 0; border-radius: 2px; height: 4px; }
+            QProgressBar::chunk { background: #a6e175; }
         """)
         self.instance_list.hide()
         self.save_username_button.hide()
@@ -525,6 +614,7 @@ class LauncherWindow(QMainWindow):
         self.play_button.setEnabled(False)
         self.install_button.setEnabled(False)
         self.install_progress.setValue(0)
+        self.install_progress.show()
         self.instance_status_label.setText(f"Installing {instance['name']}…")
         self.install_worker = InstallWorker(
             self.installer,
@@ -578,6 +668,7 @@ class LauncherWindow(QMainWindow):
         if worker is not None:
             worker.deleteLater()
         self.installing_instance = None
+        self.install_progress.hide()
         self.install_button.setEnabled(self.instance_list.currentItem() is not None)
         self._refresh_install_button()
         self._refresh_play_button()
