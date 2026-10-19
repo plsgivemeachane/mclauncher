@@ -478,11 +478,11 @@ class LauncherWindow(QMainWindow):
                 0,
             )
             self.instance_list.setCurrentRow(selected_row)
-            self.setup_selector.setCurrentIndex(selected_row)
         if self.state.get("selected_setup_id"):
             selected_index = self.setup_selector.findData(self.state["selected_setup_id"], Qt.ItemDataRole.UserRole)
             if selected_index >= 0:
                 self.setup_selector.setCurrentIndex(selected_index)
+                self.setup_selector.setToolTip(self.setup_selector.itemText(selected_index))
         self._restoring_state = False
         self._restore_running_game()
 

@@ -66,6 +66,34 @@ def test_search_groups_duplicate_named_setups_by_stable_id_and_preserves_selecti
     window.close()
 
 
+def test_reopen_restores_selected_named_setup_by_stable_id_with_grouped_rows(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    root = tmp_path / "data"
+    first = LauncherWindow(data_root=root, installer=VersionInstaller([
+        {"id": "1.21.4", "type": "release"},
+    ]))
+    first.state["instances"] = [
+        {"id": "alpha-1214-a1b2c3d4", "name": "Alpha", "version": "1.21.4", "ready": False},
+        {"id": "beta-1214-e5f6a7b8", "name": "Beta", "version": "1.21.4", "ready": False},
+    ]
+    first.state["available_version_metadata"] = [{"id": "1.21.4", "type": "release"}]
+    first.state["selected_instance_id"] = "beta-1214-e5f6a7b8"
+    first.state["selected_setup_id"] = "beta-1214-e5f6a7b8"
+    for instance in first.state["instances"]:
+        first.store.create_instance_root(instance["id"])
+    first.store.save(first.state)
+    first.close()
+
+    reopened = LauncherWindow(data_root=root, installer=VersionInstaller([
+        {"id": "1.21.4", "type": "release"},
+    ]))
+    _process(application, reopened)
+    assert reopened.setup_selector.currentData() == "beta-1214-e5f6a7b8"
+    assert reopened.state["selected_setup_id"] == "beta-1214-e5f6a7b8"
+    assert reopened.state["selected_instance_id"] == "beta-1214-e5f6a7b8"
+    reopened.close()
+
+
 def test_downloaded_marker_requires_associated_automatic_instance_readiness(tmp_path):
     application = QApplication.instance() or QApplication([])
     player = ReadinessPlayer({"auto-1214-a1b2c3d4"})
