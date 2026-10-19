@@ -99,24 +99,23 @@ def test_player_can_save_identity_create_instance_and_restore_after_restart(tmp_
     application.processEvents()
 
 
-def test_changed_username_requires_warning_then_changes_local_identity(tmp_path):
+def test_changed_username_saves_and_warns_without_confirmation(tmp_path):
     application = QApplication.instance() or QApplication([])
     window = LauncherWindow(data_root=tmp_path / "launcher-data")
     window.show()
     window.username_input.setText("Alex")
-    window.save_username_button.click()
+    window.username_input.editingFinished.emit()
     original_identity = window.identity_label.text()
 
     window.username_input.setText("Sam")
-    window.save_username_button.click()
+    window.username_input.editingFinished.emit()
 
     assert window.username_warning.isVisible()
-    assert window.identity_label.text() == original_identity
-
-    window.confirm_username_change_button.click()
-    assert not window.username_warning.isVisible()
+    assert window.store.load()["username"] == "Sam"
     assert window.username_input.text() == "Sam"
+    assert window.identity_label.text() == f"Local player identity: {local_identity('Sam')}"
     assert window.identity_label.text() != original_identity
+    assert not window.confirm_username_change_button.isVisible()
     window.close()
     application.processEvents()
 

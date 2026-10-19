@@ -20,7 +20,11 @@ def test_corrupt_state_is_backed_up_and_requires_explicit_recovery(tmp_path):
     with __import__("pytest").raises(RuntimeError):
         store.save({"username": "lost", "instances": []})
     store.recover_defaults()
-    assert json.loads((root / "state.json").read_text()) == {"instances": [], "username": ""}
+    assert json.loads((root / "state.json").read_text()) == {
+        "instances": [],
+        "selected_instance_id": "",
+        "username": "",
+    }
 
 
 def test_instance_paths_reject_escape_and_symlink(tmp_path):
@@ -41,7 +45,7 @@ def test_wrong_state_field_type_is_backed_up(tmp_path):
     (root / "state.json").write_text(json.dumps(original), encoding="utf-8")
     store = LauncherStore(root)
     state = store.load()
-    assert state == {"username": "", "instances": []}
+    assert state == {"username": "", "instances": [], "selected_instance_id": ""}
     assert json.loads(next(root.glob("state.json.corrupt-*" )).read_text()) == original
 
 
