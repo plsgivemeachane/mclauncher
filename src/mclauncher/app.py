@@ -89,6 +89,7 @@ class LauncherWindow(QMainWindow):
         self.game_process = None
         self.game_instance = None
         self.game_record = None
+        self.last_game_instance = None
         self.last_diagnostic_message = ""
         self.game_registry = game_registry or GameProcessRegistry(self.store.root)
         self.game_poll_timer = QTimer(self)
@@ -340,6 +341,7 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText(f"Minecraft {version} selected")
             self.diagnostic_hint_label.clear()
             self._refresh_play_button()
+            self._preserve_lifecycle_status()
             return
         selector_row = self.setup_selector.findData(value, Qt.ItemDataRole.UserRole)
         instance_row = next(
@@ -406,10 +408,14 @@ class LauncherWindow(QMainWindow):
         snapshots = QCheckBox("Show snapshots", dialog)
         snapshots.setChecked(bool(self.state.get("show_snapshots", False)))
         form.addRow("Experimental versions", snapshots)
-        open_folder = QPushButton("Open selected setup folder", dialog)
+        lifecycle_target = self.game_instance is not None or self.last_game_instance is not None
+        target_label = "running game" if self.game_instance is not None else "last game"
+        open_folder_text = f"Open {target_label} folder" if lifecycle_target else "Open selected setup folder"
+        log_text = f"Export {target_label} diagnostic log" if lifecycle_target else "Export diagnostic log"
+        open_folder = QPushButton(open_folder_text, dialog)
         open_folder.clicked.connect(self._open_instance_folder)
         form.addRow("", open_folder)
-        export_log = QPushButton("Export diagnostic log", dialog)
+        export_log = QPushButton(log_text, dialog)
         export_log.clicked.connect(self._save_diagnostic_log)
         form.addRow("", export_log)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
@@ -617,6 +623,7 @@ class LauncherWindow(QMainWindow):
         self.game_instance = next(
             (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
         )
+        self.last_game_instance = self.game_instance
         if self.game_instance is not None:
             self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
         else:
@@ -705,6 +712,8 @@ class LauncherWindow(QMainWindow):
 
     def _select_instance(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
+            if self._preserve_lifecycle_status():
+                return
             self.instance_status_label.setText("No instance selected")
             self.diagnostic_hint_label.clear()
             self.open_folder_button.setEnabled(False)
@@ -737,6 +746,20 @@ class LauncherWindow(QMainWindow):
         self.install_button.setEnabled(self.install_worker is None)
         self._refresh_install_button()
         self._refresh_play_button()
+        self._preserve_lifecycle_status()
+
+    def _preserve_lifecycle_status(self) -> bool:
+        if self.game_process is None:
+            return False
+        if self.game_instance is not None:
+            self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
+        else:
+            self.instance_status_label.setText("A Minecraft game is already running")
+        self.diagnostic_hint_label.setText(
+            "Another Minecraft game is already running; Play is unavailable until it exits."
+        )
+        self.play_button.setEnabled(False)
+        return True
 
     def _record_diagnostic(self, instance: dict | None, message: str) -> None:
         self.last_diagnostic_message = message
@@ -746,7 +769,7 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
 
     def _open_instance_folder(self) -> None:
-        instance = self._selected_instance()
+        instance = self._diagnostic_instance()
         if instance is None:
             return
         folder = self.store.instance_root(instance["id"])
@@ -787,7 +810,7 @@ class LauncherWindow(QMainWindow):
         return "\n".join(lines) + "\n"
 
     def _save_diagnostic_log(self) -> None:
-        instance = self._selected_instance()
+        instance = self._diagnostic_instance()
         if instance is None:
             return
         filename, _ = QFileDialog.getSaveFileName(
@@ -811,6 +834,14 @@ class LauncherWindow(QMainWindow):
             return None
         instance_id = current.data(Qt.ItemDataRole.UserRole)
         return next((instance for instance in self.state["instances"] if instance.get("id") == instance_id), None)
+
+    def _diagnostic_instance(self) -> dict | None:
+        """Keep lifecycle diagnostics attached to the game that produced them."""
+        if self.game_instance is not None:
+            return self.game_instance
+        if self.last_game_instance is not None:
+            return self.last_game_instance
+        return self._selected_instance()
 
     def _selected_version(self) -> str | None:
         value = self.setup_selector.currentData(Qt.ItemDataRole.UserRole)
@@ -1046,6 +1077,7 @@ class LauncherWindow(QMainWindow):
             return
         self.game_process = process
         self.game_instance = instance
+        self.last_game_instance = instance
         process_id = process.processId() if hasattr(process, "processId") else None
         if process_id:
             self.game_record = self.game_registry.remember(process_id, instance["id"])
@@ -1068,6 +1100,7 @@ class LauncherWindow(QMainWindow):
             return
         self.game_process = None
         self.game_instance = None
+        self.last_game_instance = instance
         self.game_record = None
         self.game_registry.clear()
         self.game_registry.release()
