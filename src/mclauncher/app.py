@@ -76,10 +76,14 @@ class LauncherWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
+        self._installer_injected = installer is not None
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
         self.install_worker = None
         self.installing_instance = None
+        self.discovery_worker = None
+        self._launch_after_prepare = False
+        self._operation_instance_id = None
         self.game_process = None
         self.game_instance = None
         self.game_record = None
@@ -91,6 +95,7 @@ class LauncherWindow(QMainWindow):
         self.state = self.store.load()
         self._build_ui()
         self._restore_state()
+        self._start_version_discovery()
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -296,9 +301,84 @@ class LauncherWindow(QMainWindow):
         self.install_button.hide()
 
     def _select_setup_from_selector(self, index: int) -> None:
-        if index < 0 or index >= self.instance_list.count():
+        if index < 0 or index >= self.setup_selector.count():
             return
-        self.instance_list.setCurrentRow(index)
+        value = self.setup_selector.itemData(index, Qt.ItemDataRole.UserRole)
+        if isinstance(value, str) and value.startswith("version:"):
+            version = value.removeprefix("version:")
+            self.state["selected_setup_id"] = value
+            if not getattr(self, "_restoring_state", False) and not self.store.recovery_required:
+                self.store.save(self.state)
+            self.instance_list.setCurrentRow(-1)
+            self.instance_status_label.setText(f"Minecraft {version} selected")
+            self.diagnostic_hint_label.clear()
+            self._refresh_play_button()
+            return
+        selector_row = self.setup_selector.findData(value, Qt.ItemDataRole.UserRole)
+        matches = self.instance_list.findItems(
+            next((str(item.get("name")) for item in self.state["instances"] if item.get("id") == value), ""),
+            Qt.MatchFlag.MatchExactly,
+        )
+        if selector_row >= 0 and matches:
+            instance_row = self.instance_list.row(matches[0])
+            self.instance_list.setCurrentRow(instance_row)
+            instance = self.state["instances"][instance_row]
+            if not getattr(self, "_restoring_state", False) and not self.store.recovery_required:
+                self.state["selected_instance_id"] = instance["id"]
+                self.state["selected_setup_id"] = instance["id"]
+                self.store.save(self.state)
+
+    def _start_version_discovery(self) -> None:
+        if not self._installer_injected and QApplication.platformName() == "offscreen":
+            return
+        first_use = not self.state.get("instances") and not self.state.get("selected_setup_id")
+        self.discovery_worker = VersionDiscoveryWorker(self.installer, select_latest=first_use)
+        self.discovery_worker.discovered.connect(self._versions_discovered)
+        self.discovery_worker.failed.connect(self._version_discovery_failed)
+        self.discovery_worker.finished.connect(self._discovery_finished)
+        self.discovery_worker.start()
+
+    def _versions_discovered(self, versions: list) -> None:
+        self.state["available_versions"] = [
+            entry if isinstance(entry, str) else str(entry.get("id", "")) for entry in versions
+        ]
+        if not self.store.recovery_required:
+            self.store.save(self.state)
+        existing = {
+            self.setup_selector.itemData(i, Qt.ItemDataRole.UserRole)
+            for i in range(self.setup_selector.count())
+        }
+        self.setup_selector.blockSignals(True)
+        try:
+            for entry in versions:
+                if isinstance(entry, str):
+                    version_id = entry
+                else:
+                    version_id = str(entry.get("id", ""))
+                if not version_id or f"version:{version_id}" in existing:
+                    continue
+                self.setup_selector.addItem(f"Minecraft {version_id}", f"version:{version_id}")
+        finally:
+            self.setup_selector.blockSignals(False)
+        selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
+        if selected:
+            index = self.setup_selector.findData(selected, Qt.ItemDataRole.UserRole)
+            if index >= 0:
+                self.setup_selector.setCurrentIndex(index)
+        elif versions and self.setup_selector.count():
+            index = self.setup_selector.findData(f"version:{versions[0] if isinstance(versions[0], str) else versions[0].get('id')}")
+            self.setup_selector.setCurrentIndex(max(index, 0))
+        self._refresh_play_button()
+
+    def _version_discovery_failed(self, message: str) -> None:
+        self.diagnostic_hint_label.setText(f"Could not discover Minecraft releases: {message}")
+        self._refresh_play_button()
+
+    def _discovery_finished(self) -> None:
+        worker = self.discovery_worker
+        self.discovery_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _open_settings(self) -> None:
         dialog = QDialog(self)
@@ -350,6 +430,9 @@ class LauncherWindow(QMainWindow):
             self.play_button.setEnabled(False)
             self._restoring_state = False
             return
+        self.state.setdefault("selected_setup_id", self.state.get("selected_instance_id", ""))
+        self.state.setdefault("automatic_instances", {})
+        self.state.setdefault("available_versions", [])
         if "memory_gib" not in self.state and not self.store.recovery_required:
             self.state["memory_gib"] = default_memory_gib()
             self.store.save(self.state)
@@ -366,6 +449,11 @@ class LauncherWindow(QMainWindow):
                     instance["install_error"] = "Installation interrupted; retry to continue"
                     state_changed = True
                 self._add_instance_item(instance)
+        self._append_cached_versions()
+        if not self.state.get("selected_setup_id") and self.state.get("selected_instance_id"):
+            self.state["selected_setup_id"] = self.state["selected_instance_id"]
+        if not self.state.get("selected_setup_id") and self.state.get("instances"):
+            self.state["selected_setup_id"] = self.state["instances"][0].get("id", "")
         if state_changed and not self.store.recovery_required:
             self.store.save(self.state)
         if self.instance_list.count():
@@ -377,8 +465,22 @@ class LauncherWindow(QMainWindow):
             )
             self.instance_list.setCurrentRow(selected_row)
             self.setup_selector.setCurrentIndex(selected_row)
+        if self.state.get("selected_setup_id"):
+            selected_index = self.setup_selector.findData(self.state["selected_setup_id"], Qt.ItemDataRole.UserRole)
+            if selected_index >= 0:
+                self.setup_selector.setCurrentIndex(selected_index)
         self._restoring_state = False
         self._restore_running_game()
+
+    def _append_cached_versions(self) -> None:
+        existing = {self.setup_selector.itemData(i, Qt.ItemDataRole.UserRole) for i in range(self.setup_selector.count())}
+        self.setup_selector.blockSignals(True)
+        try:
+            for version in self.state.get("available_versions", []):
+                if f"version:{version}" not in existing:
+                    self.setup_selector.addItem(f"Minecraft {version}", f"version:{version}")
+        finally:
+            self.setup_selector.blockSignals(False)
 
     def _recover_state(self) -> None:
         self.store.recover_defaults()
@@ -508,11 +610,13 @@ class LauncherWindow(QMainWindow):
         if instance is not None:
             if not getattr(self, "_restoring_state", False):
                 self.state["selected_instance_id"] = instance["id"]
+                self.state["selected_setup_id"] = instance["id"]
             if not self.store.recovery_required and not getattr(self, "_restoring_state", False):
                 self.store.save(self.state)
-            if self.setup_selector.currentIndex() != self.instance_list.currentRow():
+            selector_row = self.setup_selector.findData(instance["id"], Qt.ItemDataRole.UserRole)
+            if self.setup_selector.currentIndex() != selector_row:
                 self.setup_selector.blockSignals(True)
-                self.setup_selector.setCurrentIndex(self.instance_list.currentRow())
+                self.setup_selector.setCurrentIndex(selector_row)
                 self.setup_selector.blockSignals(False)
         self.open_folder_button.setEnabled(instance is not None)
         self.save_log_button.setEnabled(instance is not None)
@@ -602,6 +706,34 @@ class LauncherWindow(QMainWindow):
         instance_id = current.data(Qt.ItemDataRole.UserRole)
         return next((instance for instance in self.state["instances"] if instance.get("id") == instance_id), None)
 
+    def _selected_version(self) -> str | None:
+        value = self.setup_selector.currentData(Qt.ItemDataRole.UserRole)
+        if isinstance(value, str) and value.startswith("version:"):
+            return value.removeprefix("version:")
+        return None
+
+    def _ensure_automatic_instance(self, version: str) -> dict:
+        instance_id = self.state.setdefault("automatic_instances", {}).get(version)
+        instance = next(
+            (candidate for candidate in self.state["instances"] if candidate.get("id") == instance_id), None
+        )
+        if instance is None:
+            instance_id = str(uuid.uuid4())
+            instance = {
+                "id": instance_id,
+                "name": f"Minecraft {version}",
+                "version": version,
+                "ready": False,
+                "automatic": True,
+            }
+            self.state["instances"].append(instance)
+            self.state["automatic_instances"][version] = instance_id
+            self.store.create_instance_root(instance_id)
+            self.store.save(self.state)
+            self._add_instance_item(instance)
+            self.instance_list.setCurrentRow(self.instance_list.count() - 1)
+        return instance
+
     def _install_selected_instance(self) -> None:
         instance = self._selected_instance()
         if instance is None:
@@ -614,6 +746,7 @@ class LauncherWindow(QMainWindow):
         self.play_button.setEnabled(False)
         self.install_button.setEnabled(False)
         self.install_progress.setValue(0)
+        self.install_progress.setRange(0, 100)
         self.install_progress.show()
         self.instance_status_label.setText(f"Installing {instance['name']}…")
         self.install_worker = InstallWorker(
@@ -637,7 +770,10 @@ class LauncherWindow(QMainWindow):
     def _show_install_progress(self, status: str, progress: int, maximum: int) -> None:
         if status:
             self.instance_status_label.setText(status)
-        if maximum >= 0:
+        if maximum < 0 or progress < 0:
+            self.install_progress.setRange(0, 0)
+        elif maximum >= 0:
+            self.install_progress.setRange(0, maximum)
             self.install_progress.setMaximum(maximum)
         if progress >= 0:
             self.install_progress.setValue(progress)
@@ -646,11 +782,37 @@ class LauncherWindow(QMainWindow):
         instance = self.installing_instance
         if instance is None:
             return
+        ready = True
+        if self._launch_after_prepare and hasattr(self.player, "is_ready"):
+            try:
+                ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+            except Exception as error:
+                ready = False
+                instance["install_error"] = str(error) or "Minecraft files are incomplete"
+        if not ready:
+            instance["ready"] = False
+            instance["install_state"] = "failed"
+            instance["install_error"] = instance.get("install_error") or "Minecraft files are incomplete"
+            self.store.save(self.state)
+            self.instance_status_label.setText(f"Installation failed: {instance['install_error']}")
+            self.diagnostic_hint_label.setText("Minecraft is not ready; retry preparation before playing.")
+            if self._launch_after_prepare:
+                self._launch_after_prepare = False
+                self._operation_instance_id = None
+                self.game_registry.release()
+            return
         instance["ready"] = True
         instance["install_state"] = "ready"
         instance["install_error"] = ""
         self.store.save(self.state)
         self.instance_status_label.setText(f"Ready: {instance['name']} ({instance['version']})")
+        if self._launch_after_prepare and instance.get("id") == self._operation_instance_id:
+            self._launch_after_prepare = False
+            self._operation_instance_id = None
+            username = str(self.state.get("username", "")).strip()
+            memory_gib, error = validate_memory_gib(self.memory_input.text())
+            if not error:
+                self._launch_ready_instance(instance, username, memory_gib)
 
     def _installation_failed(self, message: str) -> None:
         instance = self.installing_instance
@@ -661,6 +823,10 @@ class LauncherWindow(QMainWindow):
             self._record_diagnostic(instance, f"Installation failed: {message}")
         self.instance_status_label.setText(f"Installation failed: {message}")
         self.diagnostic_hint_label.setText("Install Minecraft again to retry this instance.")
+        if self._launch_after_prepare:
+            self._launch_after_prepare = False
+            self._operation_instance_id = None
+            self.game_registry.release()
 
     def _installation_finished(self) -> None:
         worker = self.install_worker
@@ -684,6 +850,9 @@ class LauncherWindow(QMainWindow):
 
     def _refresh_play_button(self) -> None:
         instance = self._selected_instance()
+        if instance is None and self._selected_version():
+            self.play_button.setEnabled(self.install_worker is None and self.game_process is None)
+            return
         ready = bool(instance and instance.get("ready") and self.game_process is None)
         if ready and hasattr(self.player, "is_ready"):
             try:
@@ -694,7 +863,8 @@ class LauncherWindow(QMainWindow):
 
     def _play_selected_instance(self) -> None:
         instance = self._selected_instance()
-        if instance is None:
+        selected_version = self._selected_version()
+        if instance is None and not selected_version:
             return
         if self.game_process is not None:
             self.instance_status_label.setText("A Minecraft game is already running")
@@ -709,10 +879,6 @@ class LauncherWindow(QMainWindow):
             self.game_registry.release()
             self.instance_status_label.setText("Play failed: save a local username first")
             return
-        if not instance.get("ready"):
-            self.game_registry.release()
-            self.instance_status_label.setText("Play failed: install Minecraft before playing")
-            return
         memory_gib, memory_error = validate_memory_gib(self.memory_input.text())
         if memory_error:
             self.game_registry.release()
@@ -723,6 +889,16 @@ class LauncherWindow(QMainWindow):
         if memory_gib != self.state.get("memory_gib"):
             self.state["memory_gib"] = memory_gib
             self.store.save(self.state)
+        if instance is None and selected_version:
+            instance = self._ensure_automatic_instance(selected_version)
+        if not instance.get("ready"):
+            self._launch_after_prepare = True
+            self._operation_instance_id = instance["id"]
+            self._install_selected_instance()
+            return
+        self._launch_ready_instance(instance, username, memory_gib)
+
+    def _launch_ready_instance(self, instance: dict, username: str, memory_gib: int) -> None:
         self.play_button.setEnabled(False)
         self.instance_status_label.setText(f"Starting {instance['name']}…")
         try:
@@ -783,6 +959,12 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText("Installation is still running; wait for it to finish before closing.")
             event.ignore()
             return
+        if self.discovery_worker is not None and self.discovery_worker.isRunning():
+            self.discovery_worker.requestInterruption()
+            if not self.discovery_worker.wait(1000):
+                self.instance_status_label.setText("Release discovery is still running; wait for it to finish before closing.")
+                event.ignore()
+                return
         if not self.store.recovery_required:
             self.store.save(self.state)
         self.game_poll_timer.stop()
@@ -817,6 +999,32 @@ class InstallWorker(QThread):
             self.failed.emit(str(error) or "unknown installation error")
         else:
             self.succeeded.emit()
+
+
+class VersionDiscoveryWorker(QThread):
+    discovered = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, installer, *, select_latest: bool = False) -> None:
+        super().__init__()
+        self.installer = installer
+        self.select_latest = select_latest
+
+    def run(self) -> None:
+        try:
+            if hasattr(self.installer, "discover_versions"):
+                versions = self.installer.discover_versions()
+            else:
+                versions = []
+            if self.select_latest and versions and hasattr(self.installer, "resolve_version"):
+                latest = self.installer.resolve_version()
+                versions = sorted(
+                    versions,
+                    key=lambda entry: (entry if isinstance(entry, str) else entry.get("id")) != latest,
+                )
+            self.discovered.emit(list(versions))
+        except Exception as error:
+            self.failed.emit(str(error) or "unknown release discovery error")
 
 
 def main() -> int:

@@ -62,6 +62,17 @@ class LauncherStore:
             return self._invalid_state("username must be text and instances must be a list")
         if not isinstance(value.get("selected_instance_id", ""), str):
             return self._invalid_state("selected_instance_id must be text")
+        if not isinstance(value.get("selected_setup_id", ""), str):
+            return self._invalid_state("selected_setup_id must be text")
+        if not isinstance(value.get("available_versions", []), list) or any(
+            not isinstance(version, str) for version in value.get("available_versions", [])
+        ):
+            return self._invalid_state("available_versions must be a list of text version ids")
+        if not isinstance(value.get("automatic_instances", {}), dict) or any(
+            not isinstance(version, str) or not isinstance(instance_id, str)
+            for version, instance_id in value.get("automatic_instances", {}).items()
+        ):
+            return self._invalid_state("automatic_instances must map text versions to text instance ids")
         if "memory_gib" in value and (isinstance(value["memory_gib"], bool) or not isinstance(value["memory_gib"], int)):
             return self._invalid_state("memory_gib must be an integer")
         for instance in value.get("instances", []):
@@ -77,7 +88,7 @@ class LauncherStore:
     def save(self, state: dict[str, Any]) -> None:
         if self.recovery_required:
             raise RuntimeError("State recovery is required before saving launcher data")
-        temporary = self.state_path.with_suffix(".tmp")
+        temporary = self.state_path.with_name(f"state.json.tmp-{uuid.uuid4().hex}")
         temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary.replace(self.state_path)
 
