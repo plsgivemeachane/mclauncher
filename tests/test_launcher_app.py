@@ -450,7 +450,7 @@ def test_installation_failure_explains_retry_recovery(tmp_path):
 
     assert "Installation failed" in window.instance_status_label.text()
     assert "Retry installation" in window.install_button.text()
-    assert "Install Minecraft again" in window.diagnostic_hint_label.text()
+    assert "Retry on Play" in window.diagnostic_hint_label.text()
     window.close()
     application.processEvents()
 

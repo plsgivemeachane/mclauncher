@@ -85,6 +85,7 @@ class LauncherWindow(QMainWindow):
         self.discovery_worker = None
         self._launch_after_prepare = False
         self._operation_instance_id = None
+        self._operation_selector_value = None
         self.game_process = None
         self.game_instance = None
         self.game_record = None
@@ -320,6 +321,14 @@ class LauncherWindow(QMainWindow):
             return
         value = self.setup_selector.itemData(index, Qt.ItemDataRole.UserRole)
         if value is None:
+            return
+        if self.install_worker is not None:
+            original = self._operation_selector_value
+            original_index = self.setup_selector.findData(original, Qt.ItemDataRole.UserRole)
+            if original_index >= 0 and original_index != index:
+                self.setup_selector.blockSignals(True)
+                self.setup_selector.setCurrentIndex(original_index)
+                self.setup_selector.blockSignals(False)
             return
         self.setup_selector.setToolTip(self.setup_selector.itemText(index))
         if isinstance(value, str) and value.startswith("version:"):
@@ -835,6 +844,8 @@ class LauncherWindow(QMainWindow):
         instance = self._selected_instance()
         if instance is None:
             return
+        self._operation_instance_id = instance["id"]
+        self._operation_selector_value = self.setup_selector.currentData(Qt.ItemDataRole.UserRole)
         self.installing_instance = instance
         instance["install_state"] = "installing"
         instance["install_error"] = ""
@@ -842,6 +853,11 @@ class LauncherWindow(QMainWindow):
         self.store.save(self.state)
         self.play_button.setEnabled(False)
         self.install_button.setEnabled(False)
+        self.setup_selector.setEnabled(False)
+        self.setup_search_input.setEnabled(False)
+        self.diagnostic_hint_label.setText(
+            "Preparing missing Minecraft files and runtime; an internet connection may be required."
+        )
         self.install_progress.setValue(0)
         self.install_progress.setRange(0, 100)
         self.install_progress.show()
@@ -877,7 +893,7 @@ class LauncherWindow(QMainWindow):
 
     def _installation_succeeded(self) -> None:
         instance = self.installing_instance
-        if instance is None:
+        if instance is None or instance.get("id") != self._operation_instance_id:
             return
         ready = True
         if self._launch_after_prepare and hasattr(self.player, "is_ready"):
@@ -903,6 +919,7 @@ class LauncherWindow(QMainWindow):
         instance["install_error"] = ""
         self.store.save(self.state)
         self.instance_status_label.setText(f"Ready: {instance['name']} ({instance['version']})")
+        self.diagnostic_hint_label.clear()
         if self._launch_after_prepare and instance.get("id") == self._operation_instance_id:
             self._launch_after_prepare = False
             self._operation_instance_id = None
@@ -913,13 +930,16 @@ class LauncherWindow(QMainWindow):
 
     def _installation_failed(self, message: str) -> None:
         instance = self.installing_instance
-        if instance is not None:
-            instance["ready"] = False
-            instance["install_state"] = "failed"
-            instance["install_error"] = message
-            self._record_diagnostic(instance, f"Installation failed: {message}")
+        if instance is None or instance.get("id") != self._operation_instance_id:
+            return
+        instance["ready"] = False
+        instance["install_state"] = "failed"
+        instance["install_error"] = message
+        self._record_diagnostic(instance, f"Installation failed: {message}")
         self.instance_status_label.setText(f"Installation failed: {message}")
-        self.diagnostic_hint_label.setText("Install Minecraft again to retry this instance.")
+        self.diagnostic_hint_label.setText(
+            "Press Retry on Play to prepare this setup again with the same pinned version."
+        )
         if self._launch_after_prepare:
             self._launch_after_prepare = False
             self._operation_instance_id = None
@@ -933,6 +953,9 @@ class LauncherWindow(QMainWindow):
         self.installing_instance = None
         self.install_progress.hide()
         self.install_button.setEnabled(self.instance_list.currentItem() is not None)
+        self.setup_selector.setEnabled(True)
+        self.setup_search_input.setEnabled(True)
+        self._operation_selector_value = None
         self._refresh_install_button()
         self._refresh_play_button()
 
@@ -949,14 +972,14 @@ class LauncherWindow(QMainWindow):
         instance = self._selected_instance()
         if instance is None and self._selected_version():
             self.play_button.setEnabled(self.install_worker is None and self.game_process is None)
+            self.play_button.setText("▶  Play")
             return
-        ready = bool(instance and instance.get("ready") and self.game_process is None)
-        if ready and hasattr(self.player, "is_ready"):
-            try:
-                ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
-            except Exception:
-                ready = False
-        self.play_button.setEnabled(ready)
+        available = bool(instance and self.install_worker is None and self.game_process is None)
+        self.play_button.setEnabled(available)
+        if instance and (instance.get("install_error") or instance.get("install_state") == "interrupted"):
+            self.play_button.setText("↻  Retry")
+        else:
+            self.play_button.setText("▶  Play")
 
     def _play_selected_instance(self) -> None:
         instance = self._selected_instance()
@@ -988,7 +1011,13 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
         if instance is None and selected_version:
             instance = self._ensure_automatic_instance(selected_version)
-        if not instance.get("ready"):
+        ready = bool(instance.get("ready"))
+        if ready and hasattr(self.player, "is_ready"):
+            try:
+                ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+            except Exception:
+                ready = False
+        if not ready:
             self._launch_after_prepare = True
             self._operation_instance_id = instance["id"]
             self._install_selected_instance()
