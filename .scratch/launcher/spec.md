@@ -110,6 +110,7 @@ Deliver an amd64 Debian package with a desktop-menu entry and bundled Python and
 
 ## Further Notes
 
+- Approved UX follow-up: [username, version, Play specification](../launcher-ux/spec.md) and [implementation ticket](../launcher-ux/issues/01-implement-approved-launcher-design.md). That follow-up supersedes separate save/install controls, the primary manual-instance-creation journey, and the deferral of selectable releases/snapshots. Other guarantees and outstanding acceptance gaps remain applicable.
 - Initially published to the configured local Markdown tracker as ready-for-agent. Implementation and automated verification are complete; packaged-app evidence and remaining player-acceptance gaps are recorded in Issues 01–10.
 - The original repository contained agent configuration, engineering skills, a domain glossary, and this specification, with no application code or existing domain ADR constraining the implementation.
 - Use the glossary's distinctions between instance, offline session, local player identity, vanilla Minecraft, and managed Java runtime.
