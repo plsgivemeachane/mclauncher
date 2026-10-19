@@ -1,5 +1,7 @@
 import json
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog
 
 from mclauncher.app import LauncherWindow
@@ -82,6 +84,22 @@ def test_downloaded_marker_requires_associated_automatic_instance_readiness(tmp_
     window.close()
 
 
+def test_named_ready_setup_alone_never_marks_version_downloaded(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    player = ReadinessPlayer({"named-1214-a1b2c3d4"})
+    window = LauncherWindow(data_root=tmp_path / "data", installer=VersionInstaller([
+        {"id": "1.21.4", "type": "release"},
+    ]), player=player)
+    window.state["available_version_metadata"] = [{"id": "1.21.4", "type": "release"}]
+    window.state["instances"] = [{
+        "id": "named-1214-a1b2c3d4", "name": "Named world", "version": "1.21.4", "ready": True,
+    }]
+    window._rebuild_setup_selector()
+    version_row = window.setup_selector.findData("version:1.21.4")
+    assert not window.setup_selector.itemText(version_row).startswith("✓ ")
+    window.close()
+
+
 def test_snapshots_are_opt_in_and_preference_is_saved_automatically(tmp_path, monkeypatch):
     application = QApplication.instance() or QApplication([])
     installer = VersionInstaller([
@@ -145,6 +163,66 @@ def test_disabling_snapshots_keeps_existing_pinned_snapshot_setup_visible(tmp_pa
     window._rebuild_setup_selector(selected="version:25w01a")
     assert window.setup_selector.findData("version:25w01a") >= 0
     window.close()
+
+
+def test_settings_snapshot_toggle_hides_new_snapshots_but_keeps_pinned_choice_and_defaults_off(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data", installer=VersionInstaller([
+        {"id": "1.21.4", "type": "release"}, {"id": "25w01a", "type": "snapshot"},
+    ]))
+    assert window.state["show_snapshots"] is False
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    (legacy_root / "state.json").write_text(json.dumps({"username": "Alex", "instances": []}))
+    assert LauncherStore(legacy_root).load()["show_snapshots"] is False
+    window.state["available_version_metadata"] = [
+        {"id": "1.21.4", "type": "release"}, {"id": "25w01a", "type": "snapshot"},
+    ]
+    window.state["instances"] = [{
+        "id": "auto-25w01a-a1b2c3d4", "name": "Pinned snapshot", "version": "25w01a", "ready": False,
+    }]
+    window.state["automatic_instances"] = {"25w01a": "auto-25w01a-a1b2c3d4"}
+    window.state["selected_setup_id"] = "version:25w01a"
+    window._rebuild_setup_selector(selected="version:25w01a")
+    assert window.setup_selector.findData("version:25w01a") >= 0
+
+    def disable(dialog):
+        checkbox = dialog.findChild(QCheckBox)
+        checkbox.setChecked(False)
+        return 1
+
+    monkeypatch.setattr(QDialog, "exec", disable)
+    window.state["show_snapshots"] = True
+    window._open_settings()
+    assert window.state["show_snapshots"] is False
+    assert window.setup_selector.findData("version:25w01a") >= 0
+    window.close()
+
+
+def test_keyboard_navigation_and_compact_long_labels_remain_accessible(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data", installer=VersionInstaller([]))
+    window.state["instances"] = [
+        {"id": "alpha-12345678", "name": "A very long survival world name that must remain discoverable", "version": "1.21.4", "ready": False},
+        {"id": "beta-12345678", "name": "A very long survival world name that must remain discoverable", "version": "1.21.4", "ready": False},
+    ]
+    window._add_instance_item(window.state["instances"][0])
+    window._add_instance_item(window.state["instances"][1])
+    window.resize(680, 420)
+    window.show()
+    screenshot = window.grab()
+    assert screenshot.size().width() == 680
+    assert screenshot.size().height() == 420
+    window.setup_selector.setCurrentIndex(window.setup_selector.findData("alpha-12345678"))
+    window.setup_selector.setFocus()
+    window.setup_selector.showPopup()
+    QTest.keyClick(window.setup_selector, Qt.Key.Key_Down)
+    assert window.setup_selector.currentData() == "beta-12345678"
+    assert window.setup_selector.itemData(window.setup_selector.currentIndex(), Qt.ItemDataRole.ToolTipRole)
+    assert window.setup_selector.itemData(window.setup_selector.currentIndex(), Qt.ItemDataRole.AccessibleTextRole)
+    window.setup_selector.hidePopup()
+    window.close()
+
 
 
 def test_invalid_snapshot_preference_requires_state_recovery(tmp_path):

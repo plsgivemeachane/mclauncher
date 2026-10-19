@@ -176,6 +176,7 @@ class LauncherWindow(QMainWindow):
         self.setup_search_input.setObjectName("setupSearchInput")
         self.setup_search_input.setPlaceholderText("Search versions and saved setups")
         self.setup_search_input.setClearButtonEnabled(True)
+        self.setup_search_input.setMaximumHeight(32)
         self.setup_search_input.textChanged.connect(self._filter_setup_selector)
         launch_layout.addWidget(self.setup_search_input)
         self.selector_empty_label = QLabel(launch_bar)
@@ -293,6 +294,7 @@ class LauncherWindow(QMainWindow):
             QLabel#diagnosticHintLabel, QLabel#usernameWarning { color: #e7c17a; font-size: 11px; }
             QLineEdit, QComboBox { background: #252e28; color: #eef3e9; border: 1px solid #3b453d; border-radius: 7px; padding: 8px 13px; min-height: 28px; }
             QLabel#selectorEmptyLabel { color: #a7b3a9; font-size: 11px; }
+            QLineEdit#setupSearchInput { min-height: 18px; padding: 4px 9px; }
             QPushButton { background: transparent; color: #c7d2c9; border: 1px solid transparent; border-radius: 7px; padding: 8px 12px; }
             QPushButton:hover { background: #ffffff10; border-color: #516052; }
             QPushButton#playButton { background: #a6e175; color: #1c2c16; border-color: #b7eb89; font-weight: 750; min-width: 120px; }
@@ -319,6 +321,7 @@ class LauncherWindow(QMainWindow):
         value = self.setup_selector.itemData(index, Qt.ItemDataRole.UserRole)
         if value is None:
             return
+        self.setup_selector.setToolTip(self.setup_selector.itemText(index))
         if isinstance(value, str) and value.startswith("version:"):
             version = value.removeprefix("version:")
             self.state["selected_setup_id"] = value
@@ -519,8 +522,12 @@ class LauncherWindow(QMainWindow):
             if entry.get("type") != "release" and not self.state.get("show_snapshots", False) and not pinned:
                 continue
             marker = "✓ " if self._version_is_downloaded(version) else ""
-            self.setup_selector.addItem(f"{marker}Minecraft {version}", f"version:{version}")
-            self.setup_selector.setItemData(self.setup_selector.count() - 1, entry.get("type", "release"), Qt.ItemDataRole.UserRole + 1)
+            label = f"{marker}Minecraft {version}"
+            self.setup_selector.addItem(label, f"version:{version}")
+            row = self.setup_selector.count() - 1
+            self.setup_selector.setItemData(row, entry.get("type", "release"), Qt.ItemDataRole.UserRole + 1)
+            self.setup_selector.setItemData(row, label, Qt.ItemDataRole.ToolTipRole)
+            self.setup_selector.setItemData(row, label, Qt.ItemDataRole.AccessibleTextRole)
         self.setup_selector.addItem("Saved setups", None)
         header = self.setup_selector.model().item(self.setup_selector.count() - 1)
         if header is not None:
@@ -528,7 +535,11 @@ class LauncherWindow(QMainWindow):
         for instance in instances:
             name = str(instance.get("name", "Unnamed setup"))
             suffix = f" · {instance.get('id', '')}"
-            self.setup_selector.addItem(f"{name}{suffix}", instance.get("id"))
+            label = f"{name}{suffix}"
+            self.setup_selector.addItem(label, instance.get("id"))
+            row = self.setup_selector.count() - 1
+            self.setup_selector.setItemData(row, label, Qt.ItemDataRole.ToolTipRole)
+            self.setup_selector.setItemData(row, label, Qt.ItemDataRole.AccessibleTextRole)
         index = self.setup_selector.findData(current, Qt.ItemDataRole.UserRole) if current else -1
         if index < 0:
             for row in range(self.setup_selector.count()):
