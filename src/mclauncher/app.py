@@ -43,6 +43,7 @@ from .lifecycle import GameProcessRegistry
 from .modpack import ModrinthPackError, ModrinthPackImporter, UnsupportedModrinthPack
 from .modrinth_catalog import ModrinthCatalog, ModrinthCatalogError, ModrinthRelease
 from .news import MinecraftNewsFeed
+from .localmods import copy_mod_to_instance, inspect_mod_jar
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
@@ -184,9 +185,13 @@ class LauncherWindow(QMainWindow):
         self.browse_nav_button = QPushButton("Browse", navigation)
         self.browse_nav_button.setObjectName("browseNavButton")
         self.browse_nav_button.clicked.connect(lambda: self._show_page(2))
+        self.mods_nav_button = QPushButton("Mods", navigation)
+        self.mods_nav_button.setObjectName("modsNavButton")
+        self.mods_nav_button.clicked.connect(lambda: self._show_page(3))
         navigation_layout.addWidget(self.home_nav_button)
         navigation_layout.addWidget(self.instances_nav_button)
         navigation_layout.addWidget(self.browse_nav_button)
+        navigation_layout.addWidget(self.mods_nav_button)
         navigation_layout.addStretch(1)
         layout.addWidget(navigation)
 
@@ -400,7 +405,6 @@ class LauncherWindow(QMainWindow):
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
         legacy_layout.addWidget(self.import_modpack_button)
         self.content_stack.addWidget(legacy_panel)
-
         browse_panel = QWidget(root)
         browse_layout = QVBoxLayout(browse_panel)
         browse_layout.setContentsMargins(26, 20, 26, 20)
@@ -441,6 +445,39 @@ class LauncherWindow(QMainWindow):
         browse_body.addLayout(details, 1)
         browse_layout.addLayout(browse_body, 1)
         self.content_stack.addWidget(browse_panel)
+        mods_panel = QWidget(root)
+        mods_layout = QVBoxLayout(mods_panel)
+        mods_layout.setContentsMargins(26, 24, 26, 24)
+        mods_heading = QLabel("Mods", mods_panel)
+        mods_heading.setObjectName("modsHeading")
+        mods_layout.addWidget(mods_heading)
+        self.mods_instance_label = QLabel("Select an instance to manage its mods.", mods_panel)
+        self.mods_instance_label.setObjectName("modsInstanceLabel")
+        mods_layout.addWidget(self.mods_instance_label)
+        self.mods_warning_label = QLabel(mods_panel)
+        self.mods_warning_label.setObjectName("modsWarningLabel")
+        self.mods_warning_label.setWordWrap(True)
+        mods_layout.addWidget(self.mods_warning_label)
+        self.mods_list = QListWidget(mods_panel)
+        self.mods_list.setObjectName("modsList")
+        self.mods_list.currentRowChanged.connect(lambda _row: self._refresh_mod_buttons())
+        mods_layout.addWidget(self.mods_list, 1)
+        mods_actions = QHBoxLayout()
+        self.import_mod_button = QPushButton("Import local JAR", mods_panel)
+        self.import_mod_button.setObjectName("importModButton")
+        self.import_mod_button.clicked.connect(self._import_local_mod)
+        self.toggle_mod_button = QPushButton("Disable selected", mods_panel)
+        self.toggle_mod_button.setObjectName("toggleModButton")
+        self.toggle_mod_button.clicked.connect(self._toggle_selected_mod)
+        self.remove_mod_button = QPushButton("Remove selected", mods_panel)
+        self.remove_mod_button.setObjectName("removeModButton")
+        self.remove_mod_button.clicked.connect(self._remove_selected_mod)
+        mods_actions.addWidget(self.import_mod_button)
+        mods_actions.addWidget(self.toggle_mod_button)
+        mods_actions.addWidget(self.remove_mod_button)
+        mods_layout.addLayout(mods_actions)
+        self.content_stack.addWidget(mods_panel)
+        self.mods_panel = mods_panel
         layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
         self._apply_compact_theme()
@@ -453,7 +490,7 @@ class LauncherWindow(QMainWindow):
             QWidget { background: #161b19; color: #eef3e9; }
             QFrame#titleBar { background: #172019; }
             QFrame#navigationBar { background: #172019; }
-            QPushButton#homeNavButton[active="true"], QPushButton#instancesNavButton[active="true"], QPushButton#browseNavButton[active="true"] { background: #2c3d30; color: #e6f4dc; }
+            QPushButton#homeNavButton[active="true"], QPushButton#instancesNavButton[active="true"], QPushButton#browseNavButton[active="true"], QPushButton#modsNavButton[active="true"] { background: #2c3d30; color: #e6f4dc; }
             QLabel#brandLabel { color: #c5cfc7; font-size: 15px; font-weight: 650; }
             QFrame#launchBar { background: #1b231e; }
             QLabel#usernameFieldLabel, QLabel#setupFieldLabel { color: #a7b3a9; font-size: 11px; }
@@ -473,6 +510,9 @@ class LauncherWindow(QMainWindow):
             QLabel#newsHeading, QLabel#changelogHeading { color: #e6f4dc; font-weight: 700; }
             QLabel#newsCard { background: #26352a; border: 1px solid #526452; border-radius: 6px; padding: 8px; color: #eef3e9; }
             QLabel#launcherChangelog { color: #c7d2c9; }
+            QLabel#modsWarningLabel { color: #e7c17a; }
+            QLabel#modsHeading { color: #e6f4dc; font-size: 18px; font-weight: 700; }
+            QLabel#modsInstanceLabel { color: #c7d2c9; }
         """)
         self.save_username_button.hide()
         self.save_memory_button.hide()
@@ -483,18 +523,22 @@ class LauncherWindow(QMainWindow):
         self.confirm_username_change_button.hide()
         self.home_nav_button.setProperty("active", True)
         self.browse_nav_button.setProperty("active", False)
+        self.mods_nav_button.setProperty("active", False)
 
     def _show_page(self, index: int) -> None:
         if self.content_stack is None:
             return
-        index = 0 if index not in (0, 1, 2) else index
+        index = 0 if index not in (0, 1, 2, 3) else index
         self.content_stack.setCurrentIndex(index)
         self.home_nav_button.setProperty("active", index == 0)
         self.instances_nav_button.setProperty("active", index == 1)
         self.browse_nav_button.setProperty("active", index == 2)
-        for button in (self.home_nav_button, self.instances_nav_button, self.browse_nav_button):
+        self.mods_nav_button.setProperty("active", index == 3)
+        for button in (self.home_nav_button, self.instances_nav_button, self.browse_nav_button, self.mods_nav_button):
             button.style().unpolish(button)
             button.style().polish(button)
+        if index == 3:
+            self._refresh_mods_panel()
 
     def _choose_background(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -1335,7 +1379,124 @@ class LauncherWindow(QMainWindow):
         self._refresh_install_button()
         self._refresh_play_button()
         self._refresh_instance_mutation_buttons()
+        self._refresh_mods_panel()
         self._preserve_lifecycle_status()
+
+    def _refresh_mods_panel(self) -> None:
+        instance = self._selected_instance()
+        selected_mod_id = self.mods_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.mods_list.currentItem() else None
+        self.mods_list.clear()
+        if instance is None:
+            self.mods_instance_label.setText("Select an instance to manage its mods.")
+            self.mods_warning_label.clear()
+            self._refresh_mod_buttons()
+            return
+        modified = bool(instance.get("modified"))
+        self.mods_instance_label.setText(
+            f"{instance.get('name', 'Instance')} · {instance.get('version') or 'version not pinned'}"
+            + (" · Modified curated pack" if modified else "")
+        )
+        if instance.get("provider") and modified:
+            self.mods_warning_label.setText(
+                "This curated pack has been modified. Added local mods may be incompatible with its release."
+            )
+        else:
+            self.mods_warning_label.clear()
+        for mod in instance.get("mods", []):
+            enabled = bool(mod.get("enabled", True))
+            verified = "verified" if mod.get("metadata_verified") and mod.get("compatible") is True else "unverified"
+            item = QListWidgetItem(f"{'✓' if enabled else '○'} {mod.get('name', mod.get('filename', 'mod'))} · {verified}")
+            item.setData(Qt.ItemDataRole.UserRole, mod.get("id"))
+            item.setToolTip(str(mod.get("compatibility_reason", "")))
+            self.mods_list.addItem(item)
+            if selected_mod_id and mod.get("id") == selected_mod_id:
+                self.mods_list.setCurrentItem(item)
+        self._refresh_mod_buttons()
+
+    def _refresh_mod_buttons(self) -> None:
+        instance = self._selected_instance()
+        blocked = self._mutation_blocked(instance, report=False) if instance else True
+        has_mod = instance is not None and self.mods_list.currentRow() >= 0
+        enabled = instance is not None and not blocked and not self._session_controls_locked
+        self.import_mod_button.setEnabled(enabled)
+        self.toggle_mod_button.setEnabled(enabled and has_mod)
+        self.remove_mod_button.setEnabled(enabled and has_mod)
+        if has_mod:
+            mod = instance.get("mods", [])[self.mods_list.currentRow()]
+            self.toggle_mod_button.setText("Disable selected" if mod.get("enabled", True) else "Enable selected")
+
+    def _import_local_mod(self) -> None:
+        instance = self._selected_instance()
+        if self._mutation_blocked(instance) or self.store.recovery_required:
+            return
+        filename, _ = QFileDialog.getOpenFileName(self, "Import local mod JAR", "", "Minecraft mods (*.jar);;All files (*)")
+        if not filename:
+            return
+        source = Path(filename)
+        metadata = inspect_mod_jar(source, game_version=instance.get("version"), loader=instance.get("loader"))
+        if metadata.get("compatible") is False:
+            self.mods_warning_label.setText(f"Cannot import {source.name}: {metadata['compatibility_reason']}")
+            return
+        try:
+            target = copy_mod_to_instance(source, self.store.instance_minecraft_root(instance["id"]))
+        except (OSError, ValueError) as error:
+            self.mods_warning_label.setText(f"Could not import {source.name}: {error}")
+            return
+        mod = dict(metadata)
+        mod.update({"id": f"local:{target.name}", "filename": target.name, "path": str(target.relative_to(self.store.instance_minecraft_root(instance["id"]))),
+                    "enabled": True, "source": "local", "source_path": str(source)})
+        instance.setdefault("mods", []).append(mod)
+        instance["modified"] = True
+        self.store.save(self.state)
+        self._refresh_mods_panel()
+        if metadata.get("compatible") is None:
+            self.mods_warning_label.setText(
+                f"Imported {source.name}, but metadata could not verify compatibility. Review it before playing."
+            )
+        elif instance.get("provider"):
+            self.mods_warning_label.setText("Added local mod. This curated pack is now marked modified; compatibility is not guaranteed.")
+
+    def _toggle_selected_mod(self) -> None:
+        instance = self._selected_instance()
+        row = self.mods_list.currentRow()
+        if self._mutation_blocked(instance) or instance is None or row < 0:
+            return
+        mod = instance.get("mods", [])[row]
+        root = self.store.instance_minecraft_root(instance["id"])
+        current = root / str(mod.get("path", ""))
+        enabled = not bool(mod.get("enabled", True))
+        destination = root / ("mods" if enabled else "mods-disabled") / str(mod.get("filename", current.name))
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if current.exists():
+                current.replace(destination)
+            else:
+                self.mods_warning_label.setText("The selected mod file is missing; restore it before enabling it.")
+                return
+        except OSError as error:
+            self.mods_warning_label.setText(f"Could not change mod state: {error}")
+            return
+        mod["enabled"] = enabled
+        mod["path"] = str(destination.relative_to(root))
+        self.store.save(self.state)
+        self._refresh_mods_panel()
+
+    def _remove_selected_mod(self) -> None:
+        instance = self._selected_instance()
+        row = self.mods_list.currentRow()
+        if self._mutation_blocked(instance) or instance is None or row < 0:
+            return
+        mod = instance.get("mods", [])[row]
+        root = self.store.instance_minecraft_root(instance["id"])
+        try:
+            (root / str(mod.get("path", ""))).unlink(missing_ok=True)
+        except OSError as error:
+            self.mods_warning_label.setText(f"Could not remove mod: {error}")
+            return
+        instance["mods"] = [item for item in instance.get("mods", []) if item is not mod]
+        instance["modified"] = True
+        self.store.save(self.state)
+        self._refresh_mods_panel()
 
     def _refresh_instance_mutation_buttons(self) -> None:
         instance = self._selected_instance()
@@ -1360,6 +1521,9 @@ class LauncherWindow(QMainWindow):
             self.rename_instance_button,
             self.duplicate_instance_button,
             self.delete_instance_button,
+            self.import_mod_button,
+            self.toggle_mod_button,
+            self.remove_mod_button,
         ):
             control.setEnabled(not locked)
         self._refresh_play_button()
