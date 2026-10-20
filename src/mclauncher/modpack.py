@@ -305,6 +305,8 @@ class ModrinthPackUpdater:
         for path in sorted((path for path in root.rglob("*") if path.is_dir()), key=lambda item: len(item.parts), reverse=True):
             cls._fsync_file(path)
         cls._fsync_file(root)
+        if root.parent.is_dir():
+            cls._fsync_file(root.parent)
 
     @classmethod
     def _durable_paths(cls, root: Path, paths) -> None:
@@ -313,7 +315,11 @@ class ModrinthPackUpdater:
             candidate = Path(path)
             if candidate.is_file():
                 cls._fsync_file(candidate)
-            directories.add(candidate.parent)
+            directory = candidate.parent
+            while directory != root and root in directory.parents:
+                directories.add(directory)
+                directory = directory.parent
+            directories.add(root)
         for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
             if directory.is_dir():
                 cls._fsync_file(directory)

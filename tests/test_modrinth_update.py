@@ -79,6 +79,34 @@ def test_journal_is_durable_before_live_tree_publication(tmp_path):
     assert observed == {"old_file_present": True, "journal_parent": root.parent}
 
 
+def test_changed_path_sync_flushes_all_ancestor_directories(tmp_path, monkeypatch):
+    root = tmp_path / "minecraft"
+    changed = root / "config" / "nested" / "settings.toml"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("new", encoding="utf-8")
+    synced = []
+    monkeypatch.setattr(ModrinthPackUpdater, "_fsync_file", staticmethod(synced.append))
+    ModrinthPackUpdater._durable_paths(root, [changed])
+    assert changed in synced
+    assert root / "config" / "nested" in synced
+    assert root / "config" in synced
+    assert root in synced
+
+
+def test_recovery_syncs_restored_tree_before_journal_unlink(tmp_path, monkeypatch):
+    root = tmp_path / "minecraft"
+    instance = _instance(root)
+    updater = ModrinthPackUpdater(FakeImporter())
+    updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: True)
+    order = []
+    original_tree = updater._durable_tree
+    original_unlink = updater._durable_unlink
+    monkeypatch.setattr(updater, "_durable_tree", lambda path: (order.append("sync"), original_tree(path))[1])
+    monkeypatch.setattr(updater, "_durable_unlink", lambda path: (order.append("unlink"), original_unlink(path))[1])
+    updater.recover(instance, root)
+    assert order[:2] == ["sync", "unlink"]
+
+
 def test_update_declined_local_warning_does_not_publish(tmp_path):
     root = tmp_path / "minecraft"
     instance = _instance(root)
@@ -192,9 +220,14 @@ def test_window_updates_existing_instance_and_reopens_metadata(tmp_path, monkeyp
     window.create_instance_button.click()
     instance = window.state["instances"][0]
     instance.update(provider="modrinth", pack_release_id="release-1", ready=True, install_state="ready")
+    events = []
+    original_save = window.store.save
+    monkeypatch.setattr(window.store, "save", lambda state: (events.append("save"), original_save(state))[1])
+    monkeypatch.setattr(ModrinthPackUpdater, "_durable_unlink", staticmethod(lambda path: events.append("unlink")))
     window._update_selected_modrinth_pack()
     assert instance["pack_release_id"] == "release-2"
     assert instance["install_state"] == "ready"
+    assert events[-2:] == ["save", "unlink"]
     window.close()
     reopened = LauncherWindow(data_root=tmp_path / "data", modrinth_updater=Updater(), player=Player())
     application.processEvents()
