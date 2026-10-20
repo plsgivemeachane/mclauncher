@@ -49,6 +49,39 @@ def test_game_lock_allows_only_one_launcher_claim(tmp_path):
     second.release()
 
 
+def test_launcher_waiting_for_game_lock_binds_adopted_record_to_instance(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    data_root = tmp_path / "launcher-data"
+    instance = {"id": "survival-12345678", "name": "Survival", "version": "1.21.4", "ready": True}
+    data_root.mkdir()
+    (data_root / "state.json").write_text(
+        json.dumps({"username": "Alex", "memory_gib": 2, "instances": [instance]}), encoding="utf-8"
+    )
+    holder = GameProcessRegistry(data_root)
+    assert holder.acquire()
+    window = LauncherWindow(data_root=data_root)
+    process = _started_sleep_process()
+    try:
+        window._waiting_for_game_lock = True
+        window.game_poll_timer.start()
+        record = holder.remember(process.pid, instance["id"])
+        assert record is not None
+        holder.release()
+
+        window._poll_adopted_game()
+
+        assert window.game_instance["id"] == instance["id"]
+        assert window.last_game_instance["id"] == instance["id"]
+        assert window.instance_status_label.text() == "Running: Survival"
+        assert not window.play_button.isEnabled()
+    finally:
+        window.close()
+        if process.poll() is None:
+            process.terminate()
+            process.wait()
+        application.processEvents()
+
+
 def test_launcher_reopens_running_game_and_clears_record_after_exit(tmp_path):
     application = QApplication.instance() or QApplication([])
     data_root = tmp_path / "launcher-data"

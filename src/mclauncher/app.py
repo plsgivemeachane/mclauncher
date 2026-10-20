@@ -1068,8 +1068,16 @@ class LauncherWindow(QMainWindow):
             if record is not None and self.game_registry.is_alive(record):
                 self.game_record = record
                 self.game_process = record
+                instance_id = record.get("instance_id")
+                self.game_instance = next(
+                    (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
+                )
+                self.last_game_instance = self.game_instance
                 self._set_session_controls_locked(True)
-                self.instance_status_label.setText("A Minecraft game is already running")
+                if self.game_instance is not None:
+                    self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
+                else:
+                    self.instance_status_label.setText("A Minecraft game is already running")
                 return
             self.game_registry.release()
             self._refresh_play_button()
