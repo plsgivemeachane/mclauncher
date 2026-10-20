@@ -114,6 +114,9 @@ class LauncherWindow(QMainWindow):
         self._launch_after_prepare = False
         self._operation_instance_id = None
         self._operation_selector_value = None
+        self._operation_username = None
+        self._operation_memory_gib = None
+        self._session_controls_locked = False
         self.game_process = None
         self.game_instance = None
         self.game_record = None
@@ -411,8 +414,8 @@ class LauncherWindow(QMainWindow):
         value = self.setup_selector.itemData(index, Qt.ItemDataRole.UserRole)
         if value is None:
             return
-        if self.install_worker is not None:
-            original = self._operation_selector_value
+        if self.install_worker is not None or self._session_controls_locked:
+            original = self._operation_selector_value or self.state.get("selected_setup_id")
             original_index = self.setup_selector.findData(original, Qt.ItemDataRole.UserRole)
             if original_index >= 0 and original_index != index:
                 self.setup_selector.blockSignals(True)
@@ -728,6 +731,9 @@ class LauncherWindow(QMainWindow):
             return
         self.game_record = record
         self.game_process = record
+        self._operation_selector_value = self.state.get("selected_setup_id") or self.setup_selector.currentData(
+            Qt.ItemDataRole.UserRole
+        )
         instance_id = record.get("instance_id")
         self.game_instance = next(
             (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
@@ -737,7 +743,7 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
         else:
             self.instance_status_label.setText("A Minecraft game is already running")
-        self.play_button.setEnabled(False)
+        self._set_session_controls_locked(True)
         self.game_poll_timer.start()
 
     def _poll_adopted_game(self) -> None:
@@ -749,7 +755,7 @@ class LauncherWindow(QMainWindow):
             if record is not None and self.game_registry.is_alive(record):
                 self.game_record = record
                 self.game_process = record
-                self.play_button.setEnabled(False)
+                self._set_session_controls_locked(True)
                 self.instance_status_label.setText("A Minecraft game is already running")
                 return
             self.game_registry.release()
@@ -766,10 +772,11 @@ class LauncherWindow(QMainWindow):
         self.game_instance = None
         if instance is not None:
             self.instance_status_label.setText(f"Exited: {instance['name']}")
+        self._set_session_controls_locked(False)
         self._refresh_play_button()
 
     def _save_memory(self) -> None:
-        if self.store.recovery_required:
+        if self.store.recovery_required or self._session_controls_locked:
             return
         memory_gib, error = validate_memory_gib(self.memory_input.text())
         if error:
@@ -789,6 +796,10 @@ class LauncherWindow(QMainWindow):
             self.identity_label.setText("Local player identity: not saved")
 
     def _save_username(self) -> None:
+        if self._session_controls_locked:
+            if self._operation_username is not None:
+                self.username_input.setText(self._operation_username)
+            return
         candidate = self.username_input.text().strip()
         if not candidate:
             self.username_input.setText(str(self.state.get("username", "")))
@@ -818,7 +829,7 @@ class LauncherWindow(QMainWindow):
         self.confirm_username_change_button.hide()
 
     def _persist_username(self, username: str) -> None:
-        if self.store.recovery_required or not USERNAME_RE.fullmatch(username):
+        if self.store.recovery_required or self._session_controls_locked or not USERNAME_RE.fullmatch(username):
             return
         self.state["username"] = username
         self.store.save(self.state)
@@ -881,6 +892,22 @@ class LauncherWindow(QMainWindow):
         self._refresh_install_button()
         self._refresh_play_button()
         self._preserve_lifecycle_status()
+
+    def _set_session_controls_locked(self, locked: bool) -> None:
+        """Keep the active session target and launch inputs stable."""
+        self._session_controls_locked = locked
+        for control in (
+            self.username_input,
+            self.setup_selector,
+            self.setup_search_input,
+            self.settings_button,
+            self.instance_list,
+            self.instance_name_input,
+            self.create_instance_button,
+            self.install_button,
+        ):
+            control.setEnabled(not locked)
+        self._refresh_play_button()
 
     def _preserve_lifecycle_status(self) -> bool:
         if self.game_process is None:
@@ -1007,7 +1034,7 @@ class LauncherWindow(QMainWindow):
         return instance
 
     def _install_selected_instance(self) -> None:
-        if self._closing:
+        if self.install_worker is not None or self._closing:
             return
         instance = self._selected_instance()
         if instance is None:
@@ -1019,10 +1046,7 @@ class LauncherWindow(QMainWindow):
         instance["install_error"] = ""
         instance["ready"] = False
         self.store.save(self.state)
-        self.play_button.setEnabled(False)
-        self.install_button.setEnabled(False)
-        self.setup_selector.setEnabled(False)
-        self.setup_search_input.setEnabled(False)
+        self._set_session_controls_locked(True)
         self.diagnostic_hint_label.setText(
             "Preparing missing Minecraft files and runtime; an internet connection may be required."
         )
@@ -1108,10 +1132,9 @@ class LauncherWindow(QMainWindow):
         self.diagnostic_hint_label.clear()
         if self._launch_after_prepare and instance.get("id") == self._operation_instance_id:
             self._launch_after_prepare = False
-            self._operation_instance_id = None
-            username = str(self.state.get("username", "")).strip()
-            memory_gib, error = validate_memory_gib(self.memory_input.text())
-            if not error:
+            username = self._operation_username or str(self.state.get("username", "")).strip()
+            memory_gib = self._operation_memory_gib
+            if memory_gib is not None:
                 self._launch_ready_instance(instance, username, memory_gib)
 
     def _installation_failed(self, message: str) -> None:
@@ -1131,6 +1154,8 @@ class LauncherWindow(QMainWindow):
         if self._launch_after_prepare:
             self._launch_after_prepare = False
             self._operation_instance_id = None
+            self._operation_username = None
+            self._operation_memory_gib = None
             self.game_registry.release()
 
     def _installation_finished(self) -> None:
@@ -1147,7 +1172,10 @@ class LauncherWindow(QMainWindow):
         self.setup_search_input.setEnabled(True)
         self._operation_selector_value = None
         self._refresh_install_button()
-        self._refresh_play_button()
+        if self.game_process is None and not self._launch_after_prepare:
+            self._set_session_controls_locked(False)
+        else:
+            self._refresh_play_button()
 
     def _refresh_install_button(self) -> None:
         instance = self._selected_instance()
@@ -1161,10 +1189,14 @@ class LauncherWindow(QMainWindow):
     def _refresh_play_button(self) -> None:
         instance = self._selected_instance()
         if instance is None and self._selected_version():
-            self.play_button.setEnabled(self.install_worker is None and self.game_process is None)
+            self.play_button.setEnabled(
+                not self._session_controls_locked and self.install_worker is None and self.game_process is None
+            )
             self.play_button.setText("▶  Play")
             return
-        available = bool(instance and self.install_worker is None and self.game_process is None)
+        available = bool(
+            instance and not self._session_controls_locked and self.install_worker is None and self.game_process is None
+        )
         self.play_button.setEnabled(available)
         if instance and (instance.get("install_error") or instance.get("install_state") == "interrupted"):
             self.play_button.setText("↻  Retry")
@@ -1172,6 +1204,8 @@ class LauncherWindow(QMainWindow):
             self.play_button.setText("▶  Play")
 
     def _play_selected_instance(self) -> None:
+        if self.install_worker is not None or self._session_controls_locked:
+            return
         instance = self._selected_instance()
         selected_version = self._selected_version()
         if instance is None and not selected_version:
@@ -1205,19 +1239,27 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
         if instance is None and selected_version:
             instance = self._ensure_automatic_instance(selected_version)
+        self._operation_instance_id = instance["id"]
+        self._operation_selector_value = self.setup_selector.currentData(Qt.ItemDataRole.UserRole)
+        self._operation_username = username
+        self._operation_memory_gib = memory_gib
+        self._set_session_controls_locked(True)
         ready = bool(instance.get("ready"))
         if ready and hasattr(self.player, "is_ready"):
             try:
                 ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
             except Exception as error:
                 self.game_registry.release()
+                self._operation_instance_id = None
+                self._operation_username = None
+                self._operation_memory_gib = None
+                self._set_session_controls_locked(False)
                 self.instance_status_label.setText(f"Play failed: {error}")
                 self.diagnostic_hint_label.setText("Check the instance diagnostic log before retrying.")
                 self._refresh_play_button()
                 return
         if not ready:
             self._launch_after_prepare = True
-            self._operation_instance_id = instance["id"]
             self._install_selected_instance()
             return
         self._launch_ready_instance(instance, username, memory_gib)
@@ -1237,6 +1279,10 @@ class LauncherWindow(QMainWindow):
             process = self.player.launch(*launch_args, memory_gib=memory_gib)
         except Exception as error:
             self.game_registry.release()
+            self._operation_instance_id = None
+            self._operation_username = None
+            self._operation_memory_gib = None
+            self._set_session_controls_locked(False)
             self.instance_status_label.setText(f"Play failed: {error}")
             self._record_diagnostic(instance, f"Play failed: {error}")
             self.diagnostic_hint_label.setText("Install or retry this instance, then try Play again.")
@@ -1253,6 +1299,10 @@ class LauncherWindow(QMainWindow):
                 self.instance_status_label.setText("Play failed: could not verify the Minecraft process")
                 self.game_process = None
                 self.game_instance = None
+                self._operation_instance_id = None
+                self._operation_username = None
+                self._operation_memory_gib = None
+                self._set_session_controls_locked(False)
                 self._refresh_play_button()
                 return
         if self.instance_status_label.text().startswith("Starting"):
@@ -1260,7 +1310,7 @@ class LauncherWindow(QMainWindow):
 
     def _game_started(self, instance: dict) -> None:
         self.instance_status_label.setText(f"Running: {instance['name']}")
-        self.play_button.setEnabled(False)
+        self._set_session_controls_locked(True)
 
     def _game_finished(self, instance: dict, exit_code: int, crashed: bool) -> None:
         if self.game_instance is not None and self.game_instance.get("id") != instance.get("id"):
@@ -1271,6 +1321,10 @@ class LauncherWindow(QMainWindow):
         self.game_record = None
         self.game_registry.clear()
         self.game_registry.release()
+        self._operation_instance_id = None
+        self._operation_username = None
+        self._operation_memory_gib = None
+        self._set_session_controls_locked(False)
         if crashed:
             self.instance_status_label.setText(f"Game crashed: {instance['name']} (exit {exit_code})")
             self.diagnostic_hint_label.setText("Save a diagnostic log or open the instance folder before relaunching.")
