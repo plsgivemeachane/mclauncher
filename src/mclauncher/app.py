@@ -45,6 +45,8 @@ from .modpack import (
     CurseForgePackImporter,
     ModrinthPackError,
     ModrinthPackImporter,
+    ModrinthPackUpdateError,
+    ModrinthPackUpdater,
     UnsupportedModrinthPack,
 )
 from .modrinth_catalog import ModrinthCatalog, ModrinthCatalogError, ModrinthRelease
@@ -119,7 +121,7 @@ LandscapePanel = MinecraftHomePanel
 class LauncherWindow(QMainWindow):
     def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
                  modpack_importer=None, news_provider=None, modrinth_catalog=None, optifine_installer=None,
-                 curseforge_importer=None, mod_installer=None) -> None:
+                 curseforge_importer=None, mod_installer=None, modrinth_updater=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
@@ -127,6 +129,7 @@ class LauncherWindow(QMainWindow):
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
         self.modpack_importer = modpack_importer or ModrinthPackImporter(provider=self.installer)
+        self.modrinth_updater = modrinth_updater or ModrinthPackUpdater(self.modpack_importer)
         self.optifine_installer = optifine_installer or OptiFineInstaller()
         self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
             loader_resolver=getattr(self.installer, "resolve_loader", None)
@@ -418,6 +421,14 @@ class LauncherWindow(QMainWindow):
         self.import_modpack_button.setObjectName("importModpackButton")
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
         legacy_layout.addWidget(self.import_modpack_button)
+        self.update_modpack_button = QPushButton("Update selected Modrinth pack")
+        self.update_modpack_button.setObjectName("updateModpackButton")
+        self.update_modpack_button.clicked.connect(self._update_selected_modrinth_pack)
+        legacy_layout.addWidget(self.update_modpack_button)
+        self.recover_modpack_button = QPushButton("Recover last Modrinth update")
+        self.recover_modpack_button.setObjectName("recoverModpackButton")
+        self.recover_modpack_button.clicked.connect(self._recover_selected_modrinth_pack)
+        legacy_layout.addWidget(self.recover_modpack_button)
         self.install_optifine_button = QPushButton("Install local OptiFine .jar")
         self.install_optifine_button.setObjectName("installOptifineButton")
         self.install_optifine_button.clicked.connect(self._install_local_optifine)
@@ -1345,6 +1356,73 @@ class LauncherWindow(QMainWindow):
             self._refresh_install_button()
             self._refresh_play_button()
 
+    def _update_selected_modrinth_pack(self) -> None:
+        """Explicitly replace a Modrinth instance from a selected archive."""
+        instance = self._selected_instance()
+        if instance is None or instance.get("provider") != "modrinth":
+            self.diagnostic_hint_label.setText("Select an installed Modrinth pack before updating.")
+            return
+        if self._mutation_blocked(instance) or self._session_controls_locked or self.install_worker is not None:
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Update Modrinth pack", "", "Modrinth packs (*.mrpack);;All files (*)"
+        )
+        if not filename:
+            return
+        self._set_session_controls_locked(True)
+        instance["install_state"] = "updating"
+        instance["install_error"] = ""
+        self.store.save(self.state)
+        try:
+            result = self.modrinth_updater.update(
+                instance, self.store.instance_minecraft_root(instance["id"]), Path(filename),
+                release_id=str(instance.get("pending_pack_release_id", "")),
+                on_progress=self._show_import_progress,
+                confirm_local_changes=lambda paths: QMessageBox.question(
+                    self, "Local changes detected",
+                    "This update will replace pack files and may affect local changes:\n\n" + "\n".join(paths)
+                    + "\n\nContinue?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                ) == QMessageBox.StandardButton.Yes,
+            )
+            instance["ready"] = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+            if not instance["ready"]:
+                raise ModrinthPackUpdateError("Updated files are incomplete; recover from the recorded backup")
+            instance["install_state"] = "ready"
+            self.store.save(self.state)
+            self.instance_status_label.setText(f"Updated: {instance['name']}")
+            self.diagnostic_hint_label.setText(f"Update complete; backup saved at {result['backup']}")
+        except (ModrinthPackUpdateError, ModrinthPackError, OSError, RuntimeError) as error:
+            instance["ready"] = False
+            instance["install_state"] = "failed"
+            instance["install_error"] = str(error) or "Modrinth pack update failed"
+            self.store.save(self.state)
+            self.instance_status_label.setText(f"Update failed: {instance['install_error']}")
+            self.diagnostic_hint_label.setText("The previous instance is recoverable from its recorded backup; retry or recover.")
+        finally:
+            self._set_session_controls_locked(False)
+            self._refresh_play_button()
+
+    def _recover_selected_modrinth_pack(self) -> None:
+        instance = self._selected_instance()
+        if instance is None or instance.get("provider") != "modrinth":
+            return
+        if self._mutation_blocked(instance) or self._session_controls_locked:
+            return
+        self._set_session_controls_locked(True)
+        try:
+            self.modrinth_updater.recover(instance, self.store.instance_minecraft_root(instance["id"]))
+            self.store.save(self.state)
+            self.instance_status_label.setText(f"Recovered: {instance['name']}")
+            self.diagnostic_hint_label.setText("The previous Modrinth release and worlds were restored.")
+        except (ModrinthPackUpdateError, OSError, RuntimeError) as error:
+            instance["install_error"] = str(error) or "Modrinth update recovery failed"
+            self.store.save(self.state)
+            self.diagnostic_hint_label.setText(instance["install_error"])
+        finally:
+            self._set_session_controls_locked(False)
+            self._refresh_play_button()
+
     def _show_import_progress(self, status: str, current: int, maximum: int) -> None:
         if status:
             self.instance_status_label.setText(status)
@@ -1740,6 +1818,8 @@ class LauncherWindow(QMainWindow):
             self.create_instance_button,
             self.install_button,
             self.install_optifine_button,
+            self.update_modpack_button,
+            self.recover_modpack_button,
             self.import_modpack_button,
             self.import_curseforge_button,
             self.rename_instance_button,
