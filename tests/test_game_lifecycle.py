@@ -29,6 +29,16 @@ def test_process_identity_rejects_stale_start_time_and_pid_reuse(tmp_path):
         process.wait()
 
 
+def test_process_identity_retries_an_incomplete_cmdline_snapshot(monkeypatch):
+    ready = {"pid": 123, "start_time": "456", "executable": "/usr/bin/java", "cmdline": ["java", "-jar"]}
+    snapshots = [dict(ready, cmdline=[]), ready]
+
+    monkeypatch.setattr(GameProcessRegistry, "_read_process_identity", staticmethod(lambda _pid: snapshots.pop(0)))
+
+    assert GameProcessRegistry.is_alive(ready)
+    assert snapshots == []
+
+
 def test_game_lock_allows_only_one_launcher_claim(tmp_path):
     first = GameProcessRegistry(tmp_path)
     second = GameProcessRegistry(tmp_path)

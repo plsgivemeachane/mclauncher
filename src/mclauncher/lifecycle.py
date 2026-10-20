@@ -3,12 +3,16 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 
 class GameProcessRegistry:
     """Own the cross-launcher claim and identity of the managed game."""
+
+    _PROCESS_IDENTITY_ATTEMPTS = 5
+    _PROCESS_IDENTITY_RETRY_DELAY = 0.01
 
     def __init__(self, data_root: Path | str) -> None:
         self.root = Path(data_root)
@@ -55,8 +59,7 @@ class GameProcessRegistry:
             pass
 
     @staticmethod
-    def process_identity(pid: int) -> dict[str, Any] | None:
-        """Capture Linux PID identity; PID alone is deliberately insufficient."""
+    def _read_process_identity(pid: int) -> dict[str, Any] | None:
         try:
             proc = Path("/proc") / str(int(pid))
             stat = (proc / "stat").read_text(encoding="utf-8")
@@ -73,6 +76,19 @@ class GameProcessRegistry:
             }
         except (OSError, ValueError, IndexError):
             return None
+
+    @staticmethod
+    def process_identity(pid: int) -> dict[str, Any] | None:
+        """Capture Linux PID identity; PID alone is deliberately insufficient."""
+        for attempt in range(GameProcessRegistry._PROCESS_IDENTITY_ATTEMPTS):
+            identity = GameProcessRegistry._read_process_identity(pid)
+            if identity is None:
+                return None
+            if identity["cmdline"]:
+                return identity
+            if attempt + 1 < GameProcessRegistry._PROCESS_IDENTITY_ATTEMPTS:
+                time.sleep(GameProcessRegistry._PROCESS_IDENTITY_RETRY_DELAY)
+        return None
 
     @classmethod
     def is_alive(cls, record: dict[str, Any] | None) -> bool:
