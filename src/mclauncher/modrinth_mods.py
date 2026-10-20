@@ -88,6 +88,7 @@ class ModrinthModInstaller:
         stage = Path(tempfile.mkdtemp(prefix=".modrinth-mod-", dir=str(root.parent)))
         progress = on_progress or (lambda *_args: None)
         downloaded: list[tuple[ModrinthRelease, bytes, str]] = []
+        published: list[Path] = []
         try:
             for index, candidate in enumerate(releases, 1):
                 if game_version not in candidate.game_versions or loader not in candidate.loaders:
@@ -112,6 +113,7 @@ class ModrinthModInstaller:
             for candidate, _content, filename in downloaded:
                 destination = mods_dir / filename
                 shutil.copy2(stage / filename, destination)
+                published.append(destination)
                 entries.append({
                     "id": f"modrinth:{candidate.project_id}:{candidate.id}",
                     "project_id": candidate.project_id,
@@ -128,6 +130,8 @@ class ModrinthModInstaller:
                 })
             return entries
         except OSError as error:
+            for destination in published:
+                destination.unlink(missing_ok=True)
             raise ModrinthModInstallError(f"Could not publish Modrinth mods: {error}") from error
         finally:
             shutil.rmtree(stage, ignore_errors=True)
