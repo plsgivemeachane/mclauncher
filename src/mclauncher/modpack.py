@@ -309,6 +309,7 @@ class ModrinthPackUpdater:
         stage = Path(tempfile.mkdtemp(prefix=".modrinth-update-", dir=str(root.parent)))
         backup_root = root.parent / "backups"
         backup = backup_root / f"{instance.get('id', 'instance')}-{time.time_ns()}"
+        journal = root.parent / "update-journal.json"
         old_files = {str(path) for path in instance.get("installed_files", []) if isinstance(path, str)}
         try:
             metadata = self.importer.import_archive(
@@ -335,6 +336,11 @@ class ModrinthPackUpdater:
                 raise ModrinthPackUpdateError("Update cancelled because local mod changes were not confirmed")
             backup_root.mkdir(parents=True, exist_ok=True)
             self._copy_tree(root, backup)
+            journal.write_text(json.dumps({
+                "provider": metadata.get("provider", instance.get("provider", "modrinth")),
+                "instance_id": instance.get("id", ""), "backup": str(backup),
+                "archive": str(archive_path),
+            }) + "\n", encoding="utf-8")
             progress("Backed up current instance", 0, 1)
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
@@ -355,10 +361,11 @@ class ModrinthPackUpdater:
                 game_version=metadata["game_version"], loader=metadata["loader"],
                 loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
                 pack_format=metadata["format"], install_state="ready", ready=True,
-                install_error="", recovery_backup=str(backup),
+                install_error="", recovery_backup=str(backup), update_recovery_required=False,
             )
             if release_id:
                 instance["pack_release_id"] = release_id
+            journal.unlink(missing_ok=True)
             return {"metadata": metadata, "backup": str(backup), "local_files": local_names}
         except Exception as error:
             if backup.is_dir():
@@ -368,6 +375,7 @@ class ModrinthPackUpdater:
                     raise ModrinthPackUpdateError(
                         f"Update failed and recovery failed: {recovery_error}"
                     ) from error
+                journal.unlink(missing_ok=True)
             if isinstance(error, ModrinthPackError):
                 raise
             raise ModrinthPackUpdateError(f"Modrinth pack update failed: {error}") from error
@@ -380,9 +388,11 @@ class ModrinthPackUpdater:
         if not backup.is_dir():
             raise ModrinthPackUpdateError("The recorded Modrinth update backup is unavailable")
         self._copy_tree(backup, root)
+        (root.parent / "update-journal.json").unlink(missing_ok=True)
         instance["install_state"] = "ready"
         instance["ready"] = True
         instance["install_error"] = ""
+        instance["update_recovery_required"] = False
 
 
 class CurseForgeProvider:

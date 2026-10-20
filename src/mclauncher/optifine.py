@@ -67,7 +67,7 @@ class OptiFineInstaller:
     """Copy a verified local OptiFine artifact into a vanilla or Forge instance."""
 
     def __init__(self, compatibility: Mapping[tuple[str, str], OptiFineCompatibility | Mapping] | None = None):
-        self.compatibility = dict(compatibility or {})
+        self.compatibility = dict(DEFAULT_OPTIFINE_COMPATIBILITY if compatibility is None else compatibility)
 
     def _evidence(self, game: str, optifine_version: str) -> OptiFineCompatibility:
         value = self.compatibility.get((game, optifine_version))
@@ -135,3 +135,12 @@ class OptiFineInstaller:
         return {"optifine_version": identity["optifine_version"], "game_version": game,
                 "loader": loader or "vanilla", "launch_version": launch_version,
                 "path": str(Path(jar_path).name)}
+
+
+# Official downloads evidence recorded on 2026-10-20.  Keep this deliberately
+# small: unknown releases and Forge pairings fail closed until verified.
+DEFAULT_OPTIFINE_COMPATIBILITY = {
+    ("1.21.11", "1.21.11_HD_U_J9"): OptiFineCompatibility(
+        "1.21.11", "1.21.11_HD_U_J9", forge_version="61.0.8"
+    ),
+}

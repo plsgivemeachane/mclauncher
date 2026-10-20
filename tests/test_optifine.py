@@ -67,6 +67,15 @@ def test_malformed_local_jar_is_rejected(tmp_path):
         inspect_optifine_jar(path)
 
 
+def test_default_exact_official_optifine_pair_is_available(tmp_path):
+    jar = _jar(tmp_path / "OptiFine_1.21.11_HD_U_J9.jar", "1.21.11_HD_U_J9")
+    instance = {"minecraft_version": "1.21.11"}
+    root = tmp_path / "minecraft"
+    _base(root, "1.21.11")
+    result = OptiFineInstaller().prepare(instance, root, jar)
+    assert result["optifine_version"] == "1.21.11_HD_U_J9"
+
+
 def test_window_prepares_selected_local_optifine_and_reports_failure(tmp_path, monkeypatch):
     application = QApplication.instance() or QApplication([])
     jar = _jar(tmp_path / "OptiFine_1.20.1_HD_U_I6.jar")

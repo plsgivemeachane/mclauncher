@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import threading
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -137,6 +139,8 @@ class LauncherWindow(QMainWindow):
         )
         self.curseforge_updater = curseforge_updater or ModrinthPackUpdater(self.curseforge_importer)
         self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
+        self._catalog_injected = modrinth_catalog is not None
+        self._catalog_worker = None
         self.mod_installer = mod_installer or ModrinthModInstaller(self.modrinth_catalog)
         self._catalog_results = []
         self._catalog_releases = []
@@ -207,6 +211,7 @@ class LauncherWindow(QMainWindow):
         self.mods_nav_button = QPushButton("Mods", navigation)
         self.mods_nav_button.setObjectName("modsNavButton")
         self.mods_nav_button.clicked.connect(lambda: self._show_page(3))
+        self.mods_nav_button.hide()
         navigation_layout.addWidget(self.home_nav_button)
         navigation_layout.addWidget(self.instances_nav_button)
         navigation_layout.addWidget(self.browse_nav_button)
@@ -423,6 +428,10 @@ class LauncherWindow(QMainWindow):
         self.import_modpack_button.setObjectName("importModpackButton")
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
         legacy_layout.addWidget(self.import_modpack_button)
+        self.manage_mods_button = QPushButton("Manage mods for selected instance")
+        self.manage_mods_button.setObjectName("manageModsButton")
+        self.manage_mods_button.clicked.connect(lambda: self._show_page(3))
+        legacy_layout.addWidget(self.manage_mods_button)
         self.update_modpack_button = QPushButton("Update selected pack")
         self.update_modpack_button.setObjectName("updateModpackButton")
         self.update_modpack_button.clicked.connect(self._update_selected_modrinth_pack)
@@ -848,6 +857,19 @@ class LauncherWindow(QMainWindow):
         state_changed = False
         for instance in self.state.get("instances", []):
             if isinstance(instance, dict) and instance.get("name") and instance.get("id"):
+                journal = self.store.instance_root(instance["id"]) / "update-journal.json"
+                if journal.is_file():
+                    try:
+                        journal_data = json.loads(journal.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        journal_data = {}
+                    instance["update_recovery_required"] = True
+                    if isinstance(journal_data, dict) and isinstance(journal_data.get("backup"), str):
+                        instance["recovery_backup"] = journal_data["backup"]
+                    instance["ready"] = False
+                    instance["install_state"] = "failed"
+                    instance["install_error"] = "An interrupted pack update needs recovery from its backup"
+                    state_changed = True
                 if instance.get("install_state") == "installing":
                     instance["install_state"] = "interrupted"
                     instance["ready"] = False
@@ -1184,18 +1206,74 @@ class LauncherWindow(QMainWindow):
         self._catalog_installing = True
         self.modrinth_install_button.setEnabled(False)
         archive = self.store.root / f".modrinth-catalog-{release.id}.mrpack"
+        if not self._catalog_injected:
+            self._catalog_installing = True
+            existing = self._selected_instance()
+            updating = bool(existing and existing.get("provider") == "modrinth" and existing.get("pack_project_id") == release.project_id)
+            instance = existing if updating else self._create_pack_instance(title, archive, provider="modrinth", pack_release_id=release.id, pack_project_id=release.project_id)
+            self._catalog_release_context = (release, title, archive, instance)
+            self.modrinth_install_button.setEnabled(False)
+            self._catalog_worker = CatalogOperationWorker(
+                self.modrinth_catalog, release, self.modpack_importer, self.installer,
+                archive, self.store.instance_minecraft_root(instance["id"]), instance,
+                self.modrinth_updater if updating else None, release.id if updating else "",
+            )
+            self._catalog_worker.progress.connect(self._show_import_progress)
+            self._catalog_worker.completed.connect(self._catalog_download_completed)
+            self._catalog_worker.failed.connect(self._catalog_download_failed)
+            self._catalog_worker.finished.connect(lambda: setattr(self, "_catalog_worker", None))
+            self._catalog_worker.start()
+            return
         try:
             archive.write_bytes(self.modrinth_catalog.download_release(release))
-            self._install_modrinth_archive(
-                archive, title, pack_release_id=release.id, pack_project_id=release.project_id,
-            )
-            self.modrinth_catalog_status.setText(f"Installed {title} {release.version_number or release.name}.")
+            selected = self._selected_instance()
+            if selected and selected.get("provider") == "modrinth" and selected.get("pack_project_id") == release.project_id:
+                self._perform_pack_update(selected, archive, release_id=release.id)
+                self.modrinth_catalog_status.setText(f"Updated {title} {release.version_number or release.name}.")
+            else:
+                self._install_pack_archive(
+                    archive, title, pack_release_id=release.id, pack_project_id=release.project_id,
+                )
+                self.modrinth_catalog_status.setText(f"Installed {title} {release.version_number or release.name}.")
         except (ModrinthCatalogError, ModrinthPackError, UnsupportedModrinthPack, OSError, RuntimeError) as error:
             self.modrinth_catalog_status.setText(f"Modrinth installation failed: {error}")
         finally:
             archive.unlink(missing_ok=True)
             self._catalog_installing = False
             self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
+
+    def _catalog_download_completed(self) -> None:
+        if self._closing:
+            return
+        release, title, archive, instance = self._catalog_release_context
+        try:
+            if self._catalog_worker.updating:
+                instance.update(self._catalog_worker.instance_result)
+                self.store.save(self.state)
+                self.modrinth_catalog_status.setText(f"Updated {title} {release.version_number or release.name}.")
+            else:
+                self._finish_pack_install(instance, self._catalog_worker.metadata, self._catalog_worker.instance_result, title)
+                self.modrinth_catalog_status.setText(f"Installed {title} {release.version_number or release.name}.")
+        except (ModrinthCatalogError, ModrinthPackError, UnsupportedModrinthPack, OSError, RuntimeError) as error:
+            self.modrinth_catalog_status.setText(f"Modrinth installation failed: {error}")
+        finally:
+            archive.unlink(missing_ok=True)
+            self._catalog_installing = False
+            self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
+
+    def _catalog_download_failed(self, message: str) -> None:
+        context = getattr(self, "_catalog_release_context", None)
+        if context:
+            instance = context[3]
+            instance["install_state"] = "failed"
+            instance["install_error"] = message or "Modrinth catalog preparation failed"
+            instance["ready"] = False
+            if not self.store.recovery_required:
+                self.store.save(self.state)
+        if not self._closing:
+            self.modrinth_catalog_status.setText(f"Modrinth installation failed: {message}")
+        self._catalog_installing = False
+        self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
 
     def _import_modrinth_pack(self) -> None:
         """Import and prepare a Modrinth pack through injected collaborators."""
@@ -1208,7 +1286,7 @@ class LauncherWindow(QMainWindow):
             return
         archive = Path(filename)
         name = archive.stem.strip() or "Imported Modrinth pack"
-        self._install_modrinth_archive(archive, name)
+        self._install_pack_archive(archive, name)
 
     def _import_curseforge_pack(self) -> None:
         if self._session_controls_locked or self.install_worker is not None or self.store.recovery_required:
@@ -1220,14 +1298,18 @@ class LauncherWindow(QMainWindow):
             return
         archive = Path(filename)
         name = archive.stem.strip() or "Imported CurseForge pack"
-        self._install_modrinth_archive(
+        self._install_pack_archive(
             archive, name, importer=self.curseforge_importer, provider="curseforge", display_name="CurseForge"
         )
 
-    def _install_modrinth_archive(self, archive: Path, name: str, *, pack_release_id: str = "",
+    def _install_pack_archive(self, archive: Path, name: str, *, pack_release_id: str = "",
                                   pack_project_id: str = "", importer=None, provider: str = "modrinth",
                                   display_name: str = "Modrinth") -> None:
         importer = importer or self.modpack_importer
+        instance = self._create_pack_instance(name, archive, provider=provider, pack_release_id=pack_release_id, pack_project_id=pack_project_id)
+        self._install_pack_archive_sync(instance, archive, importer, display_name)
+
+    def _create_pack_instance(self, name: str, archive: Path, *, provider: str, pack_release_id: str = "", pack_project_id: str = "") -> dict:
         existing_names = {str(item.get("name")) for item in self.state.get("instances", [])}
         base_name = name
         suffix = 2
@@ -1248,6 +1330,21 @@ class LauncherWindow(QMainWindow):
         self.store.save(self.state)
         self._add_instance_item(instance)
         self.instance_list.setCurrentRow(self.instance_list.count() - 1)
+        return instance
+
+    def _finish_pack_install(self, instance: dict, metadata: dict, result: dict, display_name: str) -> None:
+        instance.update(result)
+        instance.update(
+            version=metadata["game_version"], minecraft_version=metadata["game_version"], loader=metadata["loader"],
+            loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
+            pack_format=metadata["format"], install_state="ready", ready=True, install_error="",
+        )
+        self.store.save(self.state)
+        self.instance_status_label.setText(f"Ready: {instance['name']} ({instance['version']})")
+        self.diagnostic_hint_label.setText(f"{display_name} pack installed; Play is available.")
+
+    def _install_pack_archive_sync(self, instance: dict, archive: Path, importer, display_name: str) -> None:
+        provider = instance.get("provider")
         try:
             metadata = importer.import_archive(
                 archive, self.store.instance_minecraft_root(instance["id"]),
@@ -1373,15 +1470,19 @@ class LauncherWindow(QMainWindow):
         )
         if not filename:
             return
+        self._perform_pack_update(instance, Path(filename))
+
+    def _perform_pack_update(self, instance: dict, archive: Path, *, release_id: str = "") -> None:
+        provider = instance.get("provider")
         self._set_session_controls_locked(True)
         instance["install_state"] = "updating"
         instance["install_error"] = ""
         self.store.save(self.state)
         try:
-            updater = self.modrinth_updater if provider == "modrinth" else self.curseforge_updater
+            updater = self._updater_for_provider(provider)
             result = updater.update(
-                instance, self.store.instance_minecraft_root(instance["id"]), Path(filename),
-                release_id=str(instance.get("pending_pack_release_id", "")),
+                instance, self.store.instance_minecraft_root(instance["id"]), archive,
+                release_id=release_id or str(instance.get("pending_pack_release_id", "")),
                 on_progress=self._show_import_progress,
                 confirm_local_changes=lambda paths: QMessageBox.question(
                     self, "Local changes detected",
@@ -1423,7 +1524,7 @@ class LauncherWindow(QMainWindow):
             return
         self._set_session_controls_locked(True)
         try:
-            updater = self.modrinth_updater if provider == "modrinth" else self.curseforge_updater
+            updater = self._updater_for_provider(provider)
             updater.recover(instance, self.store.instance_minecraft_root(instance["id"]))
             self.store.save(self.state)
             self.instance_status_label.setText(f"Recovered: {instance['name']}")
@@ -1438,6 +1539,13 @@ class LauncherWindow(QMainWindow):
 
     def _recover_selected_curseforge_pack(self) -> None:
         self._recover_selected_modrinth_pack()
+
+    def _updater_for_provider(self, provider: str):
+        if provider == "modrinth":
+            return self.modrinth_updater
+        if provider == "curseforge":
+            return self.curseforge_updater
+        raise ModrinthPackUpdateError(f"No updater is configured for provider {provider!r}")
 
     def _show_import_progress(self, status: str, current: int, maximum: int) -> None:
         if status:
@@ -1463,6 +1571,10 @@ class LauncherWindow(QMainWindow):
                 self.diagnostic_hint_label.setText(
                     "This instance is being prepared; wait until preparation finishes."
                 )
+            return True
+        if instance.get("update_recovery_required"):
+            if report:
+                self.diagnostic_hint_label.setText("Recover the interrupted pack update before playing or updating it.")
             return True
         return False
 
@@ -2312,6 +2424,11 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText("Release discovery is stopping…")
             event.accept()
             return
+        if self._catalog_worker is not None and self._catalog_worker.isRunning():
+            self._closing = True
+            self._catalog_worker.requestInterruption()
+            event.accept()
+            return
         if not self.store.recovery_required:
             self.store.save(self.state)
         self.game_poll_timer.stop()
@@ -2319,6 +2436,85 @@ class LauncherWindow(QMainWindow):
             self.game_registry.clear()
         self.game_registry.release()
         super().closeEvent(event)
+
+
+class CatalogOperationWorker(QThread):
+    completed = Signal()
+    failed = Signal(str)
+    progress = Signal(str, int, int)
+
+    def __init__(self, catalog, release, importer, installer, archive, directory, instance, updater=None, release_id="") -> None:
+        super().__init__()
+        self.catalog = catalog
+        self.release = release
+        self.importer = importer
+        self.installer = installer
+        self.archive = archive
+        self.directory = directory
+        self.instance = instance.copy()
+        self.updater = updater
+        self.release_id = release_id
+        self.updating = updater is not None
+        self.metadata = None
+        self.instance_result = None
+
+    def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            self.archive.write_bytes(self.catalog.download_release(self.release))
+            if self.updating:
+                result = self.updater.update(
+                    self.instance, self.directory, self.archive, release_id=self.release_id,
+                    on_progress=lambda *args: self.progress.emit(*args),
+                    confirm_local_changes=lambda _paths: True,
+                )
+                self.metadata = result["metadata"]
+            else:
+                self.metadata = self.importer.import_archive(
+                    self.archive, self.directory,
+                    on_progress=lambda *args: self.progress.emit(*args),
+                )
+                if not self.metadata.get("complete", True):
+                    raise RuntimeError("The selected catalog pack has unavailable required files")
+                if self.isInterruptionRequested():
+                    return
+                installer_method = getattr(self.installer, "install_modpack", None)
+                if not callable(installer_method):
+                    raise RuntimeError("The configured installer cannot prepare this modpack")
+                installed = installer_method(
+                    self.instance, self.directory, self.metadata,
+                    lambda *args: self.progress.emit(*args),
+                )
+                if installed:
+                    self.instance["installed_version"] = installed
+            self.instance_result = self.instance
+            if not self.isInterruptionRequested():
+                self.completed.emit()
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
+
+
+class CatalogDownloadWorker(QThread):
+    completed = Signal(bytes)
+    failed = Signal(str)
+
+    def __init__(self, catalog, release) -> None:
+        super().__init__()
+        self.catalog = catalog
+        self.release = release
+
+    def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            content = self.catalog.download_release(self.release)
+            if not self.isInterruptionRequested():
+                self.completed.emit(content)
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
 
 
 class InstallWorker(QThread):

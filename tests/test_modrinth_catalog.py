@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 import pytest
 
@@ -39,7 +40,8 @@ def test_catalog_download_uses_selected_release_url():
     catalog = ModrinthCatalog(download=lambda url: seen.append(url) or b"archive")
     release = catalog.__class__.__dict__  # keep the public adapter exercised through API parsing
     parsed = __import__("mclauncher.modrinth_catalog", fromlist=["ModrinthRelease"]).ModrinthRelease(
-        "v1", "p1", "Pack", "1", ("1.21.4",), ("fabric",), "https://cdn.modrinth.com/p.mrpack", "p.mrpack", "a", "b"
+        "v1", "p1", "Pack", "1", ("1.21.4",), ("fabric",), "https://cdn.modrinth.com/p.mrpack", "p.mrpack",
+        hashlib.sha1(b"archive").hexdigest(), hashlib.sha512(b"archive").hexdigest()
     )
     assert catalog.download_release(parsed) == b"archive"
     assert seen == [parsed.file_url]

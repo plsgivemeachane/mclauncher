@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -137,4 +138,9 @@ class ModrinthCatalog:
     get_release = release
 
     def download_release(self, release: ModrinthRelease) -> bytes:
-        return self._download(release.file_url)
+        content = self._download(release.file_url)
+        sha1 = hashlib.sha1(content).hexdigest()
+        sha512 = hashlib.sha512(content).hexdigest()
+        if sha1.lower() != release.file_sha1.lower() or sha512.lower() != release.file_sha512.lower():
+            raise ModrinthCatalogError("Modrinth release archive failed SHA-1/SHA-512 verification")
+        return content

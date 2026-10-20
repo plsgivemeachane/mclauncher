@@ -84,6 +84,20 @@ def test_failure_restores_live_tree_and_recovery_restores_backup(tmp_path):
     assert not (root / "mods" / "pack-new.jar").exists()
 
 
+def test_update_journal_survives_reopen_until_recovery(tmp_path):
+    root = tmp_path / "minecraft"
+    instance = _instance(root)
+    updater = ModrinthPackUpdater(FakeImporter())
+    updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: True)
+    journal = root.parent / "update-journal.json"
+    journal.write_text('{"backup": "missing"}\n', encoding="utf-8")
+    assert journal.is_file()
+    instance["update_recovery_required"] = True
+    assert instance["ready"] is True
+    updater.recover(instance, root)
+    assert not journal.exists()
+
+
 def test_active_instance_and_import_failure_are_refused(tmp_path):
     root = tmp_path / "minecraft"
     instance = _instance(root)
