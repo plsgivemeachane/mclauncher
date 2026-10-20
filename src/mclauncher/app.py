@@ -1291,6 +1291,11 @@ class LauncherWindow(QMainWindow):
             self._catalog_installing = True
             existing = self._selected_instance()
             updating = bool(existing and existing.get("provider") == "modrinth" and existing.get("pack_project_id") == release.project_id)
+            if updating and self._update_journal_exists(existing):
+                self.modrinth_catalog_status.setText("Recover the interrupted pack update before starting another update.")
+                self._catalog_installing = False
+                self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
+                return
             if updating:
                 answer = QMessageBox.question(
                     self, "Update pack", "Replace this instance with the selected release? Local mods and config changes will be backed up.",
@@ -1355,6 +1360,8 @@ class LauncherWindow(QMainWindow):
                 self._finish_pack_install(instance, self._catalog_worker.metadata, self._catalog_worker.instance_result, title)
                 self.modrinth_catalog_status.setText(f"Installed {title} {release.version_number or release.name}.")
         except (ModrinthCatalogError, ModrinthPackError, UnsupportedModrinthPack, OSError, RuntimeError) as error:
+            if instance.get("provider") in {"modrinth", "curseforge"} and self._update_journal_exists(instance):
+                self._mark_update_recovery_required(instance, str(error))
             self.modrinth_catalog_status.setText(f"Modrinth installation failed: {error}")
         finally:
             archive.unlink(missing_ok=True)
@@ -1372,6 +1379,8 @@ class LauncherWindow(QMainWindow):
             instance["install_state"] = "failed"
             instance["install_error"] = message or "Modrinth catalog preparation failed"
             instance["ready"] = False
+            if self._update_journal_exists(instance):
+                self._mark_update_recovery_required(instance, message)
             if not self.store.recovery_required:
                 self.store.save(self.state)
         if not self._closing:
@@ -1664,6 +1673,9 @@ class LauncherWindow(QMainWindow):
 
     def _perform_pack_update(self, instance: dict, archive: Path, *, release_id: str = "") -> None:
         provider = instance.get("provider")
+        if self._update_journal_exists(instance):
+            self.diagnostic_hint_label.setText("Recover the interrupted pack update before starting another update.")
+            return
         replacement_directory = None
         updater_injected = self._modrinth_updater_injected if provider == "modrinth" else self._curseforge_updater_injected
         if provider == "curseforge" and not updater_injected:
@@ -1722,10 +1734,7 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText(f"Updated: {instance['name']}")
             self.diagnostic_hint_label.setText(f"Update complete; backup saved at {result['backup']}")
         except (ModrinthPackUpdateError, ModrinthPackError, OSError, RuntimeError) as error:
-            instance["ready"] = False
-            instance["install_state"] = "failed"
-            instance["install_error"] = str(error) or "Modrinth pack update failed"
-            self.store.save(self.state)
+            self._mark_update_recovery_required(instance, str(error))
             self.instance_status_label.setText(f"Update failed: {instance['install_error']}")
             self.diagnostic_hint_label.setText("The previous instance is recoverable from its recorded backup; retry or recover.")
         finally:
@@ -1740,9 +1749,15 @@ class LauncherWindow(QMainWindow):
         if self._closing:
             return
         instance = self._update_worker_instance
-        instance.update(self._update_worker.instance_result)
-        self.store.save(self.state)
-        ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+        try:
+            instance.update(self._update_worker.instance_result)
+            self.store.save(self.state)
+            ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+        except (OSError, RuntimeError) as error:
+            self._mark_update_recovery_required(instance, str(error))
+            self._set_session_controls_locked(False)
+            self._refresh_play_button()
+            return
         self.instance_status_label.setText(f"Updated: {instance['name']}")
         self.diagnostic_hint_label.setText("Update complete; the previous release is backed up.")
         self._set_session_controls_locked(False)
@@ -1755,7 +1770,9 @@ class LauncherWindow(QMainWindow):
         instance["ready"] = False
         instance["install_state"] = "failed"
         instance["install_error"] = message or "Pack update failed"
-        if not self.store.recovery_required:
+        if self._update_journal_exists(instance):
+            self._mark_update_recovery_required(instance, instance["install_error"])
+        elif not self.store.recovery_required:
             self.store.save(self.state)
         if not self._closing:
             self.instance_status_label.setText(f"Update failed: {instance['install_error']}")
@@ -1786,8 +1803,7 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText(f"Recovered: {instance['name']}")
             self.diagnostic_hint_label.setText("The previous Modrinth release and worlds were restored.")
         except (ModrinthPackUpdateError, OSError, RuntimeError) as error:
-            instance["install_error"] = str(error) or "Modrinth update recovery failed"
-            self.store.save(self.state)
+            self._mark_update_recovery_required(instance, str(error) or "Modrinth update recovery failed")
             self.diagnostic_hint_label.setText(instance["install_error"])
         finally:
             self._set_session_controls_locked(False)
@@ -1810,6 +1826,30 @@ class LauncherWindow(QMainWindow):
             self.install_progress.setRange(0, maximum)
             self.install_progress.setValue(max(0, current))
 
+    def _update_journal_path(self, instance: dict) -> Path:
+        return self.store.instance_root(str(instance["id"])) / "update-journal.json"
+
+    def _update_journal_exists(self, instance: dict | None) -> bool:
+        return bool(instance and instance.get("id") and self._update_journal_path(instance).is_file())
+
+    def _mark_update_recovery_required(self, instance: dict, message: str) -> None:
+        journal = self._update_journal_path(instance)
+        try:
+            data = json.loads(journal.read_text(encoding="utf-8")) if journal.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if isinstance(data, dict) and isinstance(data.get("backup"), str):
+            instance["recovery_backup"] = data["backup"]
+        instance["ready"] = False
+        instance["install_state"] = "failed"
+        instance["update_recovery_required"] = True
+        instance["install_error"] = message or "Pack update recovery is required"
+        if not self.store.recovery_required:
+            try:
+                self.store.save(self.state)
+            except (OSError, RuntimeError):
+                pass
+
     def _mutation_blocked(self, instance: dict | None, *, report: bool = True,
                           allow_recovery: bool = False) -> bool:
         if instance is None:
@@ -1830,6 +1870,10 @@ class LauncherWindow(QMainWindow):
                 )
             return True
         if instance.get("update_recovery_required") and not allow_recovery:
+            if report:
+                self.diagnostic_hint_label.setText("Recover the interrupted pack update before playing or updating it.")
+            return True
+        if self._update_journal_exists(instance) and not allow_recovery:
             if report:
                 self.diagnostic_hint_label.setText("Recover the interrupted pack update before playing or updating it.")
             return True

@@ -277,8 +277,60 @@ def test_window_recovery_save_failure_keeps_journal(tmp_path, monkeypatch):
     journal = window.store.instance_root(instance["id"]) / "update-journal.json"
     journal.write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(window.store, "save", lambda _state: (_ for _ in ()).throw(RuntimeError("save failed")))
-    with pytest.raises(RuntimeError, match="save failed"):
-        window._recover_selected_modrinth_pack()
+    window._recover_selected_modrinth_pack()
     assert journal.exists()
     monkeypatch.undo()
+    window.close()
+
+
+def test_update_refuses_instance_with_unresolved_journal(tmp_path, monkeypatch):
+    calls = []
+
+    class Updater:
+        def update(self, *args, **kwargs):
+            calls.append(True)
+
+    window = LauncherWindow(data_root=tmp_path / "data", modrinth_updater=Updater())
+    window.instance_name_input.setText("Pack")
+    window._create_instance()
+    instance = window.state["instances"][0]
+    instance.update(provider="modrinth", ready=True, install_state="ready")
+    window.store.save(window.state)
+    journal = window.store.instance_root(instance["id"]) / "update-journal.json"
+    journal.write_text('{"backup": "old"}\n', encoding="utf-8")
+    archive = tmp_path / "replacement.mrpack"
+    archive.write_bytes(b"fixture")
+    monkeypatch.setattr("mclauncher.app.QFileDialog.getOpenFileName", lambda *args, **kwargs: (str(archive), ""))
+    window._update_selected_modrinth_pack()
+    assert not calls
+    assert "recover" in window.diagnostic_hint_label.text().lower()
+    window.close()
+
+
+def test_update_journal_unlink_failure_marks_recovery_required(tmp_path, monkeypatch):
+    archive = tmp_path / "replacement.mrpack"
+    archive.write_bytes(b"fixture")
+
+    class Updater:
+        def update(self, instance, root, selected, **kwargs):
+            instance.update(install_state="ready", ready=True, recovery_backup=str(tmp_path / "backup"))
+            return {"backup": str(tmp_path / "backup")}
+
+    class Player:
+        @staticmethod
+        def is_ready(instance, root):
+            return True
+
+    monkeypatch.setattr("mclauncher.app.QFileDialog.getOpenFileName", lambda *args, **kwargs: (str(archive), ""))
+    monkeypatch.setattr("mclauncher.app.QMessageBox.question", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(ModrinthPackUpdater, "_durable_unlink", staticmethod(lambda path: (_ for _ in ()).throw(OSError("unlink failed"))))
+    window = LauncherWindow(data_root=tmp_path / "data", modrinth_updater=Updater(), player=Player())
+    window.instance_name_input.setText("Pack")
+    window._create_instance()
+    instance = window.state["instances"][0]
+    instance.update(provider="modrinth", ready=True, install_state="ready")
+    window._update_selected_modrinth_pack()
+    assert instance["update_recovery_required"] is True
+    assert instance["install_state"] == "failed"
+    assert instance["ready"] is False
     window.close()
