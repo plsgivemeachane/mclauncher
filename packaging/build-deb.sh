@@ -68,6 +68,13 @@ if [ -d "$ROOT/packaging/mclauncher.dist" ]; then
   [ -x "$ROOT/packaging/mclauncher.dist/entrypoint.bin" ] && cp "$ROOT/packaging/mclauncher.dist/entrypoint.bin" "$BUILD/frozen/mclauncher"
 fi
 
+# pyside6-deploy/Nuitka embeds Python modules in the executable and does not
+# reliably carry setuptools package-data along into the standalone tree. The
+# launcher resolves its bundled artwork beside the executable, so stage it
+# explicitly for the frozen Debian application.
+mkdir -p "$BUILD/frozen/assets"
+cp "$ROOT/src/mclauncher/assets/minecraft-home.png" "$BUILD/frozen/assets/minecraft-home.png"
+
 BIN=$(find "$BUILD/frozen" -maxdepth 2 -type f -perm -111 \
   \( -name 'mclauncher' -o -name 'mclauncher.bin' \) -print -quit)
 if [ -z "$BIN" ]; then
