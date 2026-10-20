@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Callable
 
 import minecraft_launcher_lib
 from PySide6.QtCore import QObject, QTimer
+
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+def validate_version_id(version: str) -> str:
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise ValueError("Minecraft version id is invalid")
+    return version
 
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -16,7 +24,7 @@ class MinecraftInstaller:
     """Application boundary for vanilla installation and managed Java checks."""
 
     def resolve_version(self) -> str:
-        return minecraft_launcher_lib.utils.get_latest_version()["release"]
+        return validate_version_id(minecraft_launcher_lib.utils.get_latest_version()["release"])
 
     def discover_versions(self) -> list[dict]:
         """Return concrete release and snapshot choices at the installation boundary."""
@@ -35,6 +43,7 @@ class MinecraftInstaller:
         version = instance.get("version")
         if not version:
             raise RuntimeError("No Minecraft version is pinned for this installation")
+        validate_version_id(version)
 
         minecraft_directory.mkdir(parents=True, exist_ok=True)
 
@@ -82,6 +91,7 @@ class MinecraftPlayer:
         version = instance.get("version")
         if not version:
             raise RuntimeError("No Minecraft version is pinned; install the instance first")
+        validate_version_id(version)
         version_root = minecraft_directory / "versions" / version
         if not self.is_ready(instance, minecraft_directory):
             raise RuntimeError("Minecraft files are incomplete; install or retry before playing")
@@ -111,6 +121,10 @@ class MinecraftPlayer:
     def is_ready(instance: dict, minecraft_directory: Path) -> bool:
         version = instance.get("version")
         if not version:
+            return False
+        try:
+            validate_version_id(version)
+        except ValueError:
             return False
         version_root = minecraft_directory / "versions" / version
         if not (version_root / f"{version}.json").is_file() or not (version_root / f"{version}.jar").is_file():

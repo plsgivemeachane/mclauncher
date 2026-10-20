@@ -6,6 +6,8 @@ import re
 import shutil
 import time
 import uuid
+import copy
+import fcntl
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,8 @@ class LauncherStore:
         self.recovery_required = False
         self.load_error = ""
         self.recovery_backup: Path | None = None
+        self._baseline: dict[str, Any] = {}
+        self.state_lock_path = self.root / "state.lock"
 
     @staticmethod
     def _defaults() -> dict[str, Any]:
@@ -106,14 +110,57 @@ class LauncherStore:
         value.setdefault("available_versions", [])
         value.setdefault("available_version_metadata", [])
         value.setdefault("show_snapshots", False)
+        self._baseline = copy.deepcopy(value)
         return value
 
     def save(self, state: dict[str, Any]) -> None:
         if self.recovery_required:
             raise RuntimeError("State recovery is required before saving launcher data")
-        temporary = self.state_path.with_name(f"state.json.tmp-{uuid.uuid4().hex}")
-        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(self.state_path)
+        with self.state_lock_path.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            latest = self._read_state_for_save()
+            merged = self._merge_concurrent_changes(latest, state)
+            temporary = self.state_path.with_name(f"state.json.tmp-{uuid.uuid4().hex}")
+            temporary.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temporary.replace(self.state_path)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        old_instances = {item.get("id"): item for item in state.get("instances", []) if isinstance(item, dict)}
+        for item in merged.get("instances", []):
+            original = old_instances.get(item.get("id"))
+            if original is not None:
+                original.clear()
+                original.update(item)
+        merged["instances"] = [old_instances.get(item.get("id"), item) for item in merged.get("instances", [])]
+        state.clear()
+        state.update(merged)
+        self._baseline = copy.deepcopy(merged)
+
+    def _read_state_for_save(self) -> dict[str, Any]:
+        if not self.state_path.exists():
+            return self._defaults()
+        try:
+            value = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return copy.deepcopy(self._baseline or self._defaults())
+        return value if isinstance(value, dict) else self._defaults()
+
+    def _merge_concurrent_changes(self, latest: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        merged = copy.deepcopy(latest)
+        baseline = self._baseline or latest
+        for key, value in state.items():
+            if key == "instances" or key == "automatic_instances":
+                continue
+            if value != baseline.get(key):
+                merged[key] = copy.deepcopy(value)
+        if state.get("instances") != baseline.get("instances"):
+            by_id = {item.get("id"): copy.deepcopy(item) for item in merged.get("instances", []) if isinstance(item, dict)}
+            for item in state.get("instances", []):
+                if isinstance(item, dict) and item.get("id"):
+                    by_id[item["id"]] = copy.deepcopy(item)
+            merged["instances"] = list(by_id.values())
+        if state.get("automatic_instances") != baseline.get("automatic_instances"):
+            merged["automatic_instances"] = {**merged.get("automatic_instances", {}), **state.get("automatic_instances", {})}
+        return merged
 
     def create_instance_root(self, instance_id: str) -> Path:
         if not self._is_safe_instance_id(instance_id):

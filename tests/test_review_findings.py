@@ -149,3 +149,28 @@ def test_close_during_install_is_ignored(tmp_path):
     window.installing_instance = None
     window.close()
     app.processEvents()
+
+
+def test_settings_memory_update_syncs_main_launch_field(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    window.state["memory_gib"] = 2
+    window.memory_input.setText("2")
+    window.state["memory_gib"] = 6
+    window.memory_input.setText("6")
+    window._save_memory()
+    assert window.state["memory_gib"] == 6
+    assert window.memory_input.text() == "6"
+    window.close()
+    app.processEvents()
+
+
+def test_invalid_username_is_rejected_before_persistence(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    window.username_input.setText("bad name")
+    window._save_username()
+    assert window.state.get("username", "") == ""
+    assert "3" in window.username_warning.text()
+    window.close()
+    app.processEvents()
