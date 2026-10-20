@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,10 @@ from .persistence import LauncherStore
 from .installer import MinecraftInstaller, MinecraftPlayer
 from .memory import default_memory_gib, validate_memory_gib
 from .lifecycle import GameProcessRegistry
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
 
 
 def local_identity(username: str) -> str:
@@ -95,6 +100,7 @@ class LauncherWindow(QMainWindow):
         self.game_poll_timer = QTimer(self)
         self.game_poll_timer.setInterval(500)
         self.game_poll_timer.timeout.connect(self._poll_adopted_game)
+        self._waiting_for_game_lock = False
         self.state = self.store.load()
         self._build_ui()
         self._restore_state()
@@ -362,6 +368,7 @@ class LauncherWindow(QMainWindow):
             return
         first_use = not self.state.get("instances") and not self.state.get("selected_setup_id")
         self.discovery_worker = VersionDiscoveryWorker(self.installer, select_latest=first_use)
+        _ACTIVE_DISCOVERY_WORKERS.add(self.discovery_worker)
         self.discovery_worker.discovered.connect(self._versions_discovered)
         self.discovery_worker.failed.connect(self._version_discovery_failed)
         self.discovery_worker.finished.connect(self._discovery_finished)
@@ -373,7 +380,7 @@ class LauncherWindow(QMainWindow):
             else {"id": str(entry.get("id", "")), "type": str(entry.get("type", "release"))}
             for entry in versions
         ]
-        metadata = [entry for entry in metadata if entry["id"]]
+        metadata = [entry for entry in metadata if entry["id"] and VERSION_RE.fullmatch(entry["id"])]
         self.state["available_version_metadata"] = metadata
         self.state["available_versions"] = [entry["id"] for entry in metadata]
         if not self.store.recovery_required:
@@ -390,6 +397,7 @@ class LauncherWindow(QMainWindow):
         worker = self.discovery_worker
         self.discovery_worker = None
         if worker is not None:
+            _ACTIVE_DISCOVERY_WORKERS.discard(worker)
             worker.deleteLater()
 
     def _open_settings(self) -> None:
@@ -424,6 +432,8 @@ class LauncherWindow(QMainWindow):
         form.addRow(buttons)
 
         def save_memory() -> None:
+            if self.store.recovery_required:
+                return
             value, message = validate_memory_gib(memory.text())
             if message:
                 error.setText(message)
@@ -431,9 +441,12 @@ class LauncherWindow(QMainWindow):
                 return
             self.state["memory_gib"] = value
             self.store.save(self.state)
+            self.memory_input.setText(str(value))
             error.hide()
 
         def save_snapshots(enabled: bool) -> None:
+            if self.store.recovery_required:
+                return
             self.state["show_snapshots"] = bool(enabled)
             self.store.save(self.state)
             selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
@@ -632,6 +645,20 @@ class LauncherWindow(QMainWindow):
         self.game_poll_timer.start()
 
     def _poll_adopted_game(self) -> None:
+        if self._waiting_for_game_lock:
+            if not self.game_registry.acquire():
+                return
+            self._waiting_for_game_lock = False
+            record = self.game_registry.adopt()
+            if record is not None and self.game_registry.is_alive(record):
+                self.game_record = record
+                self.game_process = record
+                self.play_button.setEnabled(False)
+                self.instance_status_label.setText("A Minecraft game is already running")
+                return
+            self.game_registry.release()
+            self._refresh_play_button()
+            return
         if self.game_record is None or self.game_registry.is_alive(self.game_record):
             return
         self.game_poll_timer.stop()
@@ -646,6 +673,8 @@ class LauncherWindow(QMainWindow):
         self._refresh_play_button()
 
     def _save_memory(self) -> None:
+        if self.store.recovery_required:
+            return
         memory_gib, error = validate_memory_gib(self.memory_input.text())
         if error:
             self.memory_setting_error.setText(error)
@@ -670,6 +699,13 @@ class LauncherWindow(QMainWindow):
             self.username_warning.setText("Enter a username before playing.")
             self.username_warning.show()
             return
+        if not USERNAME_RE.fullmatch(candidate):
+            self.username_warning.setText("Use 3–16 letters, numbers, or underscores for the username.")
+            self.username_warning.show()
+            self.username_input.setText(str(self.state.get("username", "")))
+            return
+        if self.store.recovery_required:
+            return
         if candidate == self.state.get("username", ""):
             self.username_warning.hide()
             return
@@ -686,6 +722,8 @@ class LauncherWindow(QMainWindow):
         self.confirm_username_change_button.hide()
 
     def _persist_username(self, username: str) -> None:
+        if self.store.recovery_required or not USERNAME_RE.fullmatch(username):
+            return
         self.state["username"] = username
         self.store.save(self.state)
         self.username_input.setText(username)
@@ -850,6 +888,8 @@ class LauncherWindow(QMainWindow):
         return None
 
     def _ensure_automatic_instance(self, version: str) -> dict:
+        if not VERSION_RE.fullmatch(version):
+            raise ValueError("Minecraft version id is invalid")
         instance_id = self.state.setdefault("automatic_instances", {}).get(version)
         instance = next(
             (candidate for candidate in self.state["instances"] if candidate.get("id") == instance_id), None
@@ -1022,9 +1062,13 @@ class LauncherWindow(QMainWindow):
             return
         if not self.game_registry.acquire():
             self.instance_status_label.setText("A Minecraft game is already running")
-            self.game_process = self.game_registry.read() or object()
+            self._waiting_for_game_lock = True
+            self.game_poll_timer.start()
             self.play_button.setEnabled(False)
             return
+        candidate_username = self.username_input.text().strip()
+        if candidate_username != str(self.state.get("username", "")):
+            self._save_username()
         username = str(self.state.get("username", "")).strip()
         if not username:
             self.game_registry.release()
@@ -1046,8 +1090,12 @@ class LauncherWindow(QMainWindow):
         if ready and hasattr(self.player, "is_ready"):
             try:
                 ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
-            except Exception:
-                ready = False
+            except Exception as error:
+                self.game_registry.release()
+                self.instance_status_label.setText(f"Play failed: {error}")
+                self.diagnostic_hint_label.setText("Check the instance diagnostic log before retrying.")
+                self._refresh_play_button()
+                return
         if not ready:
             self._launch_after_prepare = True
             self._operation_instance_id = instance["id"]
@@ -1120,10 +1168,9 @@ class LauncherWindow(QMainWindow):
             return
         if self.discovery_worker is not None and self.discovery_worker.isRunning():
             self.discovery_worker.requestInterruption()
-            if not self.discovery_worker.wait(1000):
-                self.instance_status_label.setText("Release discovery is still running; wait for it to finish before closing.")
-                event.ignore()
-                return
+            self.instance_status_label.setText("Release discovery is stopping…")
+            event.accept()
+            return
         if not self.store.recovery_required:
             self.store.save(self.state)
         self.game_poll_timer.stop()
