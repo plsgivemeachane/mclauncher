@@ -82,12 +82,19 @@ class ModrinthCatalog:
         query = urllib.parse.urlencode({key: value for key, value in params.items() if value})
         return self._request(f"{self.base_url}/{path.lstrip('/')}" + (f"?{query}" if query else ""))
 
-    def search(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
-        value = self._get("search", query=query.strip(), facets='[["project_type:modpack"]]', limit=str(limit))
+    def search(self, query: str, *, game_version: str = "", loader: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        facets = [["project_type:modpack"]]
+        if game_version:
+            facets.append([f"versions:{game_version}"])
+        if loader:
+            facets.append([f"categories:{loader}"])
+        value = self._get("search", query=query.strip(), facets=json.dumps(facets), limit=str(limit))
         hits = value.get("hits") if isinstance(value, dict) else None
         if not isinstance(hits, list):
             raise ModrinthCatalogError("Modrinth returned an invalid search response")
         return [item for item in hits if isinstance(item, dict) and item.get("project_id")]
+
+    search_modpacks = search
 
     def project(self, project_id: str) -> dict[str, Any]:
         value = self._get(f"project/{urllib.parse.quote(project_id, safe='')}")
@@ -95,12 +102,16 @@ class ModrinthCatalog:
             raise ModrinthCatalogError("Modrinth returned invalid project details")
         return value
 
+    get_project = project
+
     def releases(self, project_id: str, *, game_version: str = "", loader: str = "") -> list[ModrinthRelease]:
         params = {"game_versions": json.dumps([game_version]) if game_version else "", "loaders": json.dumps([loader]) if loader else ""}
         value = self._get(f"project/{urllib.parse.quote(project_id, safe='')}/version", **params)
         if not isinstance(value, list):
             raise ModrinthCatalogError("Modrinth returned an invalid release response")
         return [ModrinthRelease.from_api(item, project_id) for item in value if isinstance(item, dict)]
+
+    get_releases = releases
 
     def download_release(self, release: ModrinthRelease) -> bytes:
         return self._download(release.file_url)
