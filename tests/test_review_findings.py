@@ -218,3 +218,27 @@ def test_named_snapshot_does_not_reveal_version_row_when_opted_out(tmp_path):
     assert window.setup_selector.findData("version:24w01a") < 0
     window.close()
     app.processEvents()
+
+
+def test_uncreated_selected_snapshot_is_hidden_when_opted_out(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    window.state["available_version_metadata"] = [{"id": "24w01a", "type": "snapshot"}]
+    window.state["selected_setup_id"] = "version:24w01a"
+    window.state["show_snapshots"] = False
+    window._rebuild_setup_selector(selected="version:24w01a")
+    assert window.setup_selector.findData("version:24w01a") < 0
+    window.close()
+    app.processEvents()
+
+
+def test_save_refuses_to_overwrite_state_corrupted_after_load(tmp_path):
+    root = tmp_path / "data"
+    store = LauncherStore(root)
+    state = store.load()
+    state["username"] = "Alex"
+    store.save(state)
+    (root / "state.json").write_text("{broken", encoding="utf-8")
+    with __import__("pytest").raises(RuntimeError):
+        store.save(state)
+    assert (root / "state.json").read_text(encoding="utf-8") == "{broken"

@@ -32,13 +32,17 @@ from PySide6.QtWidgets import (
 )
 
 from .persistence import LauncherStore
-from .installer import MinecraftInstaller, MinecraftPlayer
+from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .memory import default_memory_gib, validate_memory_gib
 from .lifecycle import GameProcessRegistry
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
-VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
+
+
+def _release_discovery_worker(worker: QThread) -> None:
+    _ACTIVE_DISCOVERY_WORKERS.discard(worker)
+    worker.deleteLater()
 
 
 def local_identity(username: str) -> str:
@@ -373,6 +377,7 @@ class LauncherWindow(QMainWindow):
         self.discovery_worker.discovered.connect(self._versions_discovered)
         self.discovery_worker.failed.connect(self._version_discovery_failed)
         self.discovery_worker.finished.connect(self._discovery_finished)
+        self.discovery_worker.finished.connect(lambda worker=self.discovery_worker: _release_discovery_worker(worker))
         self.discovery_worker.start()
 
     def _versions_discovered(self, versions: list) -> None:
@@ -381,7 +386,14 @@ class LauncherWindow(QMainWindow):
             else {"id": str(entry.get("id", "")), "type": str(entry.get("type", "release"))}
             for entry in versions
         ]
-        metadata = [entry for entry in metadata if entry["id"] and VERSION_RE.fullmatch(entry["id"])]
+        valid_metadata = []
+        for entry in metadata:
+            try:
+                validate_version_id(entry["id"])
+            except ValueError:
+                continue
+            valid_metadata.append(entry)
+        metadata = valid_metadata
         self.state["available_version_metadata"] = metadata
         self.state["available_versions"] = [entry["id"] for entry in metadata]
         if not self.state.get("selected_setup_id") and not self.state.get("instances") and metadata:
@@ -400,9 +412,6 @@ class LauncherWindow(QMainWindow):
     def _discovery_finished(self) -> None:
         worker = self.discovery_worker
         self.discovery_worker = None
-        if worker is not None:
-            _ACTIVE_DISCOVERY_WORKERS.discard(worker)
-            worker.deleteLater()
 
     def _open_settings(self) -> None:
         dialog = QDialog(self)
@@ -549,7 +558,7 @@ class LauncherWindow(QMainWindow):
             version = str(entry.get("id", ""))
             if not version:
                 continue
-            pinned = current == f"version:{version}" or any(
+            pinned = (current == f"version:{version}" and self.state.get("automatic_instances", {}).get(version)) or any(
                 instance.get("version") == version
                 and self.state.get("automatic_instances", {}).get(version) == instance.get("id")
                 for instance in instances
@@ -896,8 +905,7 @@ class LauncherWindow(QMainWindow):
         return None
 
     def _ensure_automatic_instance(self, version: str) -> dict:
-        if not VERSION_RE.fullmatch(version):
-            raise ValueError("Minecraft version id is invalid")
+        validate_version_id(version)
         instance_id = self.state.setdefault("automatic_instances", {}).get(version)
         instance = next(
             (candidate for candidate in self.state["instances"] if candidate.get("id") == instance_id), None
@@ -1202,12 +1210,11 @@ class InstallWorker(QThread):
     failed = Signal(str)
     version_resolved = Signal(str)
 
-    def __init__(self, installer, instance: dict, minecraft_directory: Path, persist_version=None) -> None:
+    def __init__(self, installer, instance: dict, minecraft_directory: Path) -> None:
         super().__init__()
         self.installer = installer
         self.instance = instance
         self.minecraft_directory = minecraft_directory
-        self.persist_version = persist_version
         self._version_ack = threading.Event()
 
     def acknowledge_version(self) -> None:
@@ -1217,13 +1224,10 @@ class InstallWorker(QThread):
         try:
             if not self.instance.get("version"):
                 version = self.installer.resolve_version()
-                if self.persist_version is not None:
-                    self.persist_version(self.instance, version)
-                else:
-                    self.version_resolved.emit(version)
-                    self._version_ack.wait(15)
-                    if not self.instance.get("version"):
-                        raise RuntimeError("Minecraft version resolution was not acknowledged")
+                self.version_resolved.emit(version)
+                self._version_ack.wait(15)
+                if not self.instance.get("version"):
+                    raise RuntimeError("Minecraft version resolution was not acknowledged")
             self.installer.install(
                 self.instance,
                 self.minecraft_directory,
@@ -1246,17 +1250,24 @@ class VersionDiscoveryWorker(QThread):
 
     def run(self) -> None:
         try:
+            if self.isInterruptionRequested():
+                return
             if hasattr(self.installer, "discover_versions"):
                 versions = self.installer.discover_versions()
             else:
                 versions = []
+            if self.isInterruptionRequested():
+                return
             if self.select_latest and versions and hasattr(self.installer, "resolve_version"):
                 latest = self.installer.resolve_version()
+                if self.isInterruptionRequested():
+                    return
                 versions = sorted(
                     versions,
                     key=lambda entry: (entry if isinstance(entry, str) else entry.get("id")) != latest,
                 )
-            self.discovered.emit(list(versions))
+            if not self.isInterruptionRequested():
+                self.discovered.emit(list(versions))
         except Exception as error:
             self.failed.emit(str(error) or "unknown release discovery error")
 

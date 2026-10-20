@@ -140,9 +140,11 @@ class LauncherStore:
             return self._defaults()
         try:
             value = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return copy.deepcopy(self._baseline or self._defaults())
-        return value if isinstance(value, dict) else self._defaults()
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("Launcher state changed to an unreadable file; refusing to overwrite it") from error
+        if not isinstance(value, dict):
+            raise RuntimeError("Launcher state changed to an invalid value; refusing to overwrite it")
+        return value
 
     def _merge_concurrent_changes(self, latest: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         merged = copy.deepcopy(latest)
@@ -193,6 +195,7 @@ class LauncherStore:
     def recover_defaults(self) -> None:
         if self.recovery_backup is None or not self.recovery_backup.is_file():
             raise RuntimeError("The original launcher state was not backed up; recovery was refused")
+        self.state_path.unlink(missing_ok=True)
         self.recovery_required = False
         self.load_error = ""
         self.save(self._defaults())
