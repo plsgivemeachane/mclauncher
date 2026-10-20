@@ -40,6 +40,7 @@ class LauncherStore:
             "available_versions": [],
             "available_version_metadata": [],
             "show_snapshots": False,
+            "background_path": "",
         }
 
     def _backup_corrupt_state(self) -> Path | None:
@@ -110,6 +111,7 @@ class LauncherStore:
         value.setdefault("available_versions", [])
         value.setdefault("available_version_metadata", [])
         value.setdefault("show_snapshots", False)
+        value.setdefault("background_path", "")
         self._baseline = copy.deepcopy(value)
         return value
 

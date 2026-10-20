@@ -15,6 +15,9 @@ mclauncher = "mclauncher.app:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+mclauncher = ["assets/*"]
+
 [tool.setuptools.dynamic]
 version = {attr = "mclauncher.__version__"}
 
