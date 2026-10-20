@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QComboBox,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QMessageBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -351,6 +354,20 @@ class LauncherWindow(QMainWindow):
         instance_row.addWidget(self.instance_name_input)
         instance_row.addWidget(self.create_instance_button)
         legacy_layout.addLayout(instance_row)
+        mutation_row = QHBoxLayout()
+        self.rename_instance_button = QPushButton("Rename selected")
+        self.rename_instance_button.setObjectName("renameInstanceButton")
+        self.rename_instance_button.clicked.connect(self._rename_selected_instance)
+        self.duplicate_instance_button = QPushButton("Duplicate selected")
+        self.duplicate_instance_button.setObjectName("duplicateInstanceButton")
+        self.duplicate_instance_button.clicked.connect(self._duplicate_selected_instance)
+        self.delete_instance_button = QPushButton("Delete selected")
+        self.delete_instance_button.setObjectName("deleteInstanceButton")
+        self.delete_instance_button.clicked.connect(self._delete_selected_instance)
+        mutation_row.addWidget(self.rename_instance_button)
+        mutation_row.addWidget(self.duplicate_instance_button)
+        mutation_row.addWidget(self.delete_instance_button)
+        legacy_layout.addLayout(mutation_row)
         diagnostics_row = QHBoxLayout()
         self.open_folder_button = QPushButton("Open instance folder")
         self.open_folder_button.setObjectName("openFolderButton")
@@ -804,6 +821,9 @@ class LauncherWindow(QMainWindow):
         self.save_username_button.setEnabled(True)
         self.save_memory_button.setEnabled(True)
         self.create_instance_button.setEnabled(True)
+        self.rename_instance_button.setEnabled(True)
+        self.duplicate_instance_button.setEnabled(True)
+        self.delete_instance_button.setEnabled(True)
         self.memory_input.setText(str(self.state.get("memory_gib", default_memory_gib())))
         self.instance_list.clear()
         self.setup_selector.clear()
@@ -937,6 +957,114 @@ class LauncherWindow(QMainWindow):
         self.instance_list.setCurrentRow(self.instance_list.count() - 1)
         self.instance_name_input.clear()
 
+    def _mutation_blocked(self, instance: dict | None) -> bool:
+        if instance is None:
+            return True
+        instance_id = instance.get("id")
+        active_id = self.installing_instance.get("id") if self.installing_instance else None
+        running_id = self.game_instance.get("id") if self.game_instance else None
+        if instance_id in {active_id, running_id, self._operation_instance_id}:
+            self.diagnostic_hint_label.setText("This instance is active; wait until its preparation or game exits.")
+            return True
+        if instance.get("install_state") == "installing":
+            self.diagnostic_hint_label.setText("This instance is being prepared; wait until preparation finishes.")
+            return True
+        return False
+
+    def _unique_instance_name(self, requested: str, *, exclude_id: str | None = None) -> str:
+        existing = {
+            str(instance.get("name", "")).casefold()
+            for instance in self.state.get("instances", [])
+            if instance.get("id") != exclude_id
+        }
+        candidate = requested.strip() or "Unnamed setup"
+        if candidate.casefold() not in existing:
+            return candidate
+        suffix = 2
+        while f"{candidate} ({suffix})".casefold() in existing:
+            suffix += 1
+        return f"{candidate} ({suffix})"
+
+    def _rename_selected_instance(self) -> None:
+        instance = self._selected_instance()
+        if self._mutation_blocked(instance):
+            return
+        current_name = str(instance.get("name", "Unnamed setup"))
+        name, accepted = QInputDialog.getText(self, "Rename instance", "Instance name", text=current_name)
+        if not accepted:
+            return
+        name = name.strip()
+        if not name or name.casefold() == current_name.casefold():
+            return
+        instance["name"] = self._unique_instance_name(name, exclude_id=instance["id"])
+        row = self.instance_list.currentRow()
+        if row >= 0:
+            self.instance_list.item(row).setText(instance["name"])
+        self.store.save(self.state)
+        self._rebuild_setup_selector(selected=instance["id"])
+        self.instance_status_label.setText(f"Selected instance: {instance['name']}")
+
+    def _duplicate_selected_instance(self) -> None:
+        instance = self._selected_instance()
+        if self._mutation_blocked(instance):
+            return
+        source_id = str(instance["id"])
+        destination_id = str(uuid.uuid4())
+        source_root = self.store.instance_root(source_id)
+        destination_root = self.store.instances_root / destination_id
+        try:
+            shutil.copytree(source_root, destination_root)
+        except OSError as error:
+            self.diagnostic_hint_label.setText(f"Could not duplicate instance: {error}")
+            return
+        duplicate = dict(instance)
+        duplicate["id"] = destination_id
+        duplicate["name"] = self._unique_instance_name(f"Copy of {instance.get('name', 'Unnamed setup')}")
+        duplicate["install_state"] = instance.get("install_state", "ready")
+        self.state["instances"].append(duplicate)
+        self.store.save(self.state)
+        self._add_instance_item(duplicate)
+        self.instance_list.setCurrentRow(self.instance_list.count() - 1)
+
+    def _delete_selected_instance(self) -> None:
+        instance = self._selected_instance()
+        if self._mutation_blocked(instance):
+            return
+        name = str(instance.get("name", "Unnamed setup"))
+        answer = QMessageBox.question(
+            self,
+            "Delete instance",
+            f"Delete {name} and remove its worlds and saved data?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        instance_id = str(instance["id"])
+        try:
+            root = self.store.instance_root(instance_id)
+            shutil.rmtree(root)
+        except OSError as error:
+            self.diagnostic_hint_label.setText(f"Could not delete instance: {error}")
+            return
+        self.state["instances"] = [item for item in self.state["instances"] if item.get("id") != instance_id]
+        self.state["automatic_instances"] = {
+            version: value for version, value in self.state.get("automatic_instances", {}).items()
+            if value != instance_id
+        }
+        if self.state.get("selected_instance_id") == instance_id:
+            self.state["selected_instance_id"] = ""
+        if self.state.get("selected_setup_id") == instance_id:
+            self.state["selected_setup_id"] = ""
+        self.store.save(self.state)
+        row = self.instance_list.currentRow()
+        self.instance_list.takeItem(row)
+        self._rebuild_setup_selector(selected=self.state.get("selected_setup_id") or None)
+        if self.instance_list.count():
+            self.instance_list.setCurrentRow(min(row, self.instance_list.count() - 1))
+        else:
+            self._select_instance(None, None)
+
     def _add_instance_item(self, instance: dict) -> None:
         item = QListWidgetItem(str(instance["name"]))
         item.setData(Qt.ItemDataRole.UserRole, instance["id"])
@@ -953,6 +1081,7 @@ class LauncherWindow(QMainWindow):
             self.save_log_button.setEnabled(False)
             self.install_button.setEnabled(False)
             self.play_button.setEnabled(False)
+            self._refresh_instance_mutation_buttons()
             return
         instance = self._selected_instance()
         if instance is not None:
@@ -979,7 +1108,16 @@ class LauncherWindow(QMainWindow):
         self.install_button.setEnabled(self.install_worker is None)
         self._refresh_install_button()
         self._refresh_play_button()
+        self._refresh_instance_mutation_buttons()
         self._preserve_lifecycle_status()
+
+    def _refresh_instance_mutation_buttons(self) -> None:
+        instance = self._selected_instance()
+        blocked = self._mutation_blocked(instance) if instance is not None else True
+        enabled = instance is not None and not blocked and not self._session_controls_locked
+        self.rename_instance_button.setEnabled(enabled)
+        self.duplicate_instance_button.setEnabled(enabled)
+        self.delete_instance_button.setEnabled(enabled)
 
     def _set_session_controls_locked(self, locked: bool) -> None:
         """Keep the active session target and launch inputs stable."""
@@ -993,9 +1131,13 @@ class LauncherWindow(QMainWindow):
             self.instance_name_input,
             self.create_instance_button,
             self.install_button,
+            self.rename_instance_button,
+            self.duplicate_instance_button,
+            self.delete_instance_button,
         ):
             control.setEnabled(not locked)
         self._refresh_play_button()
+        self._refresh_instance_mutation_buttons()
 
     def _preserve_lifecycle_status(self) -> bool:
         if self.game_process is None:
@@ -1255,6 +1397,8 @@ class LauncherWindow(QMainWindow):
             worker.deleteLater()
         self.installing_instance = None
         self.install_progress.hide()
+        if not self._launch_after_prepare:
+            self._operation_instance_id = None
         self.install_button.setEnabled(self.instance_list.currentItem() is not None)
         self.setup_selector.setEnabled(True)
         self.setup_search_input.setEnabled(True)
@@ -1264,6 +1408,7 @@ class LauncherWindow(QMainWindow):
             self._set_session_controls_locked(False)
         else:
             self._refresh_play_button()
+        self._refresh_instance_mutation_buttons()
 
     def _refresh_install_button(self) -> None:
         instance = self._selected_instance()
@@ -1399,6 +1544,7 @@ class LauncherWindow(QMainWindow):
     def _game_started(self, instance: dict) -> None:
         self.instance_status_label.setText(f"Running: {instance['name']}")
         self._set_session_controls_locked(True)
+        self._refresh_instance_mutation_buttons()
 
     def _game_finished(self, instance: dict, exit_code: int, crashed: bool) -> None:
         if self.game_instance is not None and self.game_instance.get("id") != instance.get("id"):
@@ -1421,6 +1567,7 @@ class LauncherWindow(QMainWindow):
             self.diagnostic_hint_label.setText("Save a diagnostic log if you need help with this game exit.")
         self._record_diagnostic(instance, self.instance_status_label.text())
         self._refresh_play_button()
+        self._refresh_instance_mutation_buttons()
 
     def closeEvent(self, event) -> None:
         if self.install_worker is not None and self.installing_instance is not None:

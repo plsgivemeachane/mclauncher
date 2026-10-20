@@ -165,12 +165,24 @@ class LauncherStore:
                 merged[key] = copy.deepcopy(value)
         if state.get("instances") != baseline.get("instances"):
             by_id = {item.get("id"): copy.deepcopy(item) for item in merged.get("instances", []) if isinstance(item, dict)}
+            baseline_ids = {
+                item.get("id") for item in baseline.get("instances", []) if isinstance(item, dict) and item.get("id")
+            }
+            state_ids = {
+                item.get("id") for item in state.get("instances", []) if isinstance(item, dict) and item.get("id")
+            }
+            for removed_id in baseline_ids - state_ids:
+                by_id.pop(removed_id, None)
             for item in state.get("instances", []):
                 if isinstance(item, dict) and item.get("id"):
                     by_id[item["id"]] = copy.deepcopy(item)
             merged["instances"] = list(by_id.values())
         if state.get("automatic_instances") != baseline.get("automatic_instances"):
-            merged["automatic_instances"] = {**merged.get("automatic_instances", {}), **state.get("automatic_instances", {})}
+            automatic = dict(merged.get("automatic_instances", {}))
+            for removed_version in set(baseline.get("automatic_instances", {})) - set(state.get("automatic_instances", {})):
+                automatic.pop(removed_version, None)
+            automatic.update(state.get("automatic_instances", {}))
+            merged["automatic_instances"] = automatic
         return merged
 
     def create_instance_root(self, instance_id: str) -> Path:

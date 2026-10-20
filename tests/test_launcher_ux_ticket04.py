@@ -2,7 +2,7 @@ import json
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QCheckBox, QDialog
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QMessageBox
 
 from mclauncher.app import LauncherWindow
 from mclauncher.persistence import LauncherStore
@@ -261,3 +261,78 @@ def test_invalid_snapshot_preference_requires_state_recovery(tmp_path):
     state = store.load()
     assert store.recovery_required
     assert state["show_snapshots"] is False
+
+
+def test_instances_can_be_renamed_and_name_survives_reopen(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    root = tmp_path / "data"
+    window = LauncherWindow(data_root=root, installer=VersionInstaller([]))
+    window.instance_name_input.setText("Original")
+    window.create_instance_button.click()
+    instance_id = window.state["instances"][0]["id"]
+    monkeypatch.setattr("mclauncher.app.QInputDialog.getText", lambda *args, **kwargs: ("Renamed", True))
+    window.rename_instance_button.click()
+    assert window.state["instances"][0]["id"] == instance_id
+    assert window.state["instances"][0]["name"] == "Renamed"
+    window.close()
+    reopened = LauncherWindow(data_root=root, installer=VersionInstaller([]))
+    assert reopened.state["instances"][0]["name"] == "Renamed"
+    assert reopened.state["instances"][0]["id"] == instance_id
+    reopened.close()
+
+
+def test_duplicate_copies_data_with_new_identity_and_independent_changes(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data", installer=VersionInstaller([]))
+    window.instance_name_input.setText("Original")
+    window.create_instance_button.click()
+    original = window.state["instances"][0]
+    original_root = window.store.instance_root(original["id"])
+    marker = original_root / "worlds" / "world.txt"
+    marker.write_text("original", encoding="utf-8")
+    window.duplicate_instance_button.click()
+    duplicate = window.state["instances"][1]
+    duplicate_marker = window.store.instance_root(duplicate["id"]) / "worlds" / "world.txt"
+    assert duplicate["id"] != original["id"]
+    assert duplicate_marker.read_text(encoding="utf-8") == "original"
+    duplicate_marker.write_text("duplicate", encoding="utf-8")
+    assert marker.read_text(encoding="utf-8") == "original"
+    window.close()
+
+
+def test_delete_cancel_preserves_instance_and_confirm_removes_only_selected_data(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data", installer=VersionInstaller([]))
+    for name in ("Keep", "Remove"):
+        window.instance_name_input.setText(name)
+        window.create_instance_button.click()
+    window.instance_list.setCurrentRow(1)
+    removed = window.state["instances"][1]
+    removed_root = window.store.instance_root(removed["id"])
+    world = removed_root / "worlds" / "playthrough.txt"
+    world.write_text("progress", encoding="utf-8")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.No)
+    window.delete_instance_button.click()
+    assert world.is_file()
+    assert any(item["id"] == removed["id"] for item in window.state["instances"])
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    window.delete_instance_button.click()
+    assert not removed_root.exists()
+    assert [item["name"] for item in window.state["instances"]] == ["Keep"]
+    window.close()
+
+
+def test_active_instance_mutations_are_refused(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data", installer=VersionInstaller([]))
+    window.instance_name_input.setText("Playing")
+    window.create_instance_button.click()
+    instance = window.state["instances"][0]
+    instance["install_state"] = "installing"
+    window.store.save(window.state)
+    original_name = instance["name"]
+    window._rename_selected_instance()
+    window._duplicate_selected_instance()
+    assert instance["name"] == original_name
+    assert len(window.state["instances"]) == 1
+    window.close()
