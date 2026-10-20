@@ -51,6 +51,28 @@ Upgrade detection is verified against the installed 0.1.0 package:
 `Inst mclauncher [0.1.0] (0.1.1 local-deb [amd64])` and `1 upgraded`.
 The built executable contains the `0.1.1` runtime version.
 
+## Current integration checkpoint (0.1.2, 2026-10-20)
+
+The launcher version was advanced to `0.1.2` for the integrated changes. The
+full test suite passed on the current integration source:
+
+```text
+TASK_TEST_TMP=$(mktemp -d /tmp/mclauncher-fulltest.XXXXXX)
+uv run --no-project pytest -q --basetemp "$TASK_TEST_TMP"
+156 passed in 8.58s
+```
+
+A fresh `mclauncher_0.1.2_amd64.deb` was built in an Ubuntu 24.04 amd64
+container with a 2-core limit, a 14 GiB memory limit, and Nuitka restricted to
+two jobs. `dpkg-deb` confirmed package `mclauncher`, version `0.1.2`,
+architecture `amd64`, and the launcher, desktop entry, and bundled landscape
+asset. Package size: 47,440,448 bytes. SHA-256:
+`282379448a616753d6d83ce02c347e9f3d308b14d105e29ee57b13e6b49cbda0`.
+
+This checkpoint verifies the build artifact and its archive structure. It does
+not replace the outstanding clean-desktop gameplay and visual acceptance
+journeys below.
+
 ## Gameplay acceptance blocker
 
 During the 0.1.0 GUI smoke, version discovery failed against the clean
