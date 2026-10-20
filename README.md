@@ -9,7 +9,7 @@ A Qt desktop launcher for installing and playing Minecraft with local offline se
 Download the `.deb` from [Releases](https://github.com/plsgivemeachane/mclauncher/releases/latest), then install it:
 
 ```sh
-sudo apt install ./mclauncher_0.1.2_amd64.deb
+sudo apt install ./mclauncher_0.1.3_amd64.deb
 ```
 
 Minecraft and Java are downloaded when you press **Play** for a version that needs preparation. They are not bundled in the launcher package.
