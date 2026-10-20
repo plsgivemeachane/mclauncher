@@ -42,6 +42,7 @@ from .memory import default_memory_gib, validate_memory_gib
 from .lifecycle import GameProcessRegistry
 from .modpack import ModrinthPackError, ModrinthPackImporter, UnsupportedModrinthPack
 from .news import MinecraftNewsFeed
+from .optifine import OptiFineError, OptiFineInstaller, UnsupportedOptiFine
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
@@ -108,7 +109,7 @@ LandscapePanel = MinecraftHomePanel
 
 class LauncherWindow(QMainWindow):
     def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
-                 modpack_importer=None, news_provider=None) -> None:
+                 modpack_importer=None, news_provider=None, optifine_installer=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
@@ -116,6 +117,7 @@ class LauncherWindow(QMainWindow):
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
         self.modpack_importer = modpack_importer or ModrinthPackImporter(provider=self.installer)
+        self.optifine_installer = optifine_installer or OptiFineInstaller()
         self.install_worker = None
         self.installing_instance = None
         self.discovery_worker = None
@@ -390,6 +392,10 @@ class LauncherWindow(QMainWindow):
         self.import_modpack_button.setObjectName("importModpackButton")
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
         legacy_layout.addWidget(self.import_modpack_button)
+        self.install_optifine_button = QPushButton("Install local OptiFine .jar")
+        self.install_optifine_button.setObjectName("installOptifineButton")
+        self.install_optifine_button.clicked.connect(self._install_local_optifine)
+        legacy_layout.addWidget(self.install_optifine_button)
         self.content_stack.addWidget(legacy_panel)
         layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
@@ -667,6 +673,7 @@ class LauncherWindow(QMainWindow):
             self.save_memory_button.setEnabled(False)
             self.create_instance_button.setEnabled(False)
             self.install_button.setEnabled(False)
+            self.install_optifine_button.setEnabled(False)
             self.play_button.setEnabled(False)
             self.settings_button.setEnabled(False)
             self._restoring_state = False
@@ -1030,6 +1037,57 @@ class LauncherWindow(QMainWindow):
             self._refresh_install_button()
             self._refresh_play_button()
 
+    def _install_local_optifine(self) -> None:
+        """Prepare a player-selected OptiFine jar for the selected instance."""
+        if self._mutation_blocked(self._selected_instance()) or self._session_controls_locked or self.install_worker is not None:
+            return
+        instance = self._selected_instance()
+        if instance is None:
+            self.diagnostic_hint_label.setText("Select an installed vanilla or Forge instance first.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Install local OptiFine release", "", "OptiFine jars (*.jar);;All files (*)"
+        )
+        if not filename:
+            return
+        self._set_session_controls_locked(True)
+        instance["install_state"] = "installing"
+        instance["install_error"] = ""
+        instance["ready"] = False
+        self.store.save(self.state)
+        self.instance_status_label.setText(f"Preparing OptiFine for {instance['name']}…")
+        try:
+            result = self.optifine_installer.prepare(
+                instance, self.store.instance_minecraft_root(instance["id"]), Path(filename),
+                on_progress=self._show_import_progress,
+            )
+            instance.update(result)
+            instance["ready"] = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+            instance["install_state"] = "ready" if instance["ready"] else "incomplete"
+            if not instance["ready"]:
+                instance["install_error"] = "OptiFine was copied but the managed runtime is incomplete"
+            self.store.save(self.state)
+            self.instance_status_label.setText(
+                f"Ready: {instance['name']} ({instance.get('optifine_version', 'OptiFine')})"
+                if instance["ready"] else f"Incomplete: {instance['name']} — retry preparation"
+            )
+            self.diagnostic_hint_label.setText(
+                "Local OptiFine prepared; Play is available." if instance["ready"] else instance["install_error"]
+            )
+        except (OptiFineError, OSError, RuntimeError) as error:
+            instance["ready"] = False
+            instance["install_state"] = "failed"
+            instance["install_error"] = str(error) or "OptiFine preparation failed"
+            self.store.save(self.state)
+            self.instance_status_label.setText(f"OptiFine preparation failed: {instance['install_error']}")
+            self.diagnostic_hint_label.setText(
+                "Choose an official local OptiFine jar for a verified vanilla or Forge combination."
+            )
+        finally:
+            self._set_session_controls_locked(False)
+            self._refresh_install_button()
+            self._refresh_play_button()
+
     def _show_import_progress(self, status: str, current: int, maximum: int) -> None:
         if status:
             self.instance_status_label.setText(status)
@@ -1217,6 +1275,7 @@ class LauncherWindow(QMainWindow):
             self.instance_name_input,
             self.create_instance_button,
             self.install_button,
+            self.install_optifine_button,
             self.rename_instance_button,
             self.duplicate_instance_button,
             self.delete_instance_button,
