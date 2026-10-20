@@ -40,7 +40,13 @@ from .persistence import LauncherStore
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .memory import default_memory_gib, validate_memory_gib
 from .lifecycle import GameProcessRegistry
-from .modpack import ModrinthPackError, ModrinthPackImporter, UnsupportedModrinthPack
+from .modpack import (
+    CurseForgePackError,
+    CurseForgePackImporter,
+    ModrinthPackError,
+    ModrinthPackImporter,
+    UnsupportedModrinthPack,
+)
 from .news import MinecraftNewsFeed
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
@@ -108,7 +114,7 @@ LandscapePanel = MinecraftHomePanel
 
 class LauncherWindow(QMainWindow):
     def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
-                 modpack_importer=None, news_provider=None) -> None:
+                 modpack_importer=None, curseforge_importer=None, news_provider=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
@@ -116,6 +122,9 @@ class LauncherWindow(QMainWindow):
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
         self.modpack_importer = modpack_importer or ModrinthPackImporter(provider=self.installer)
+        self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
+            loader_resolver=getattr(self.installer, "resolve_loader", None)
+        )
         self.install_worker = None
         self.installing_instance = None
         self.discovery_worker = None
@@ -390,6 +399,10 @@ class LauncherWindow(QMainWindow):
         self.import_modpack_button.setObjectName("importModpackButton")
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
         legacy_layout.addWidget(self.import_modpack_button)
+        self.import_curseforge_button = QPushButton("Import CurseForge ZIP")
+        self.import_curseforge_button.setObjectName("importCurseForgeButton")
+        self.import_curseforge_button.clicked.connect(self._import_curseforge_pack)
+        legacy_layout.addWidget(self.import_curseforge_button)
         self.content_stack.addWidget(legacy_panel)
         layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
@@ -964,16 +977,34 @@ class LauncherWindow(QMainWindow):
         self.instance_name_input.clear()
 
     def _import_modrinth_pack(self) -> None:
-        """Import and prepare a Modrinth pack through injected collaborators."""
+        self._import_pack_archive(
+            importer=self.modpack_importer,
+            title="Import Modrinth modpack",
+            file_filter="Modrinth packs (*.mrpack);;All files (*)",
+            default_name="Imported Modrinth pack",
+            provider="modrinth",
+        )
+
+    def _import_curseforge_pack(self) -> None:
+        self._import_pack_archive(
+            importer=self.curseforge_importer,
+            title="Import CurseForge exported pack",
+            file_filter="CurseForge packs (*.zip);;All files (*)",
+            default_name="Imported CurseForge pack",
+            provider="curseforge",
+        )
+
+    def _import_pack_archive(self, *, importer, title: str, file_filter: str, default_name: str, provider: str) -> None:
+        """Import a provider archive and leave incomplete imports retryable."""
         if self._session_controls_locked or self.install_worker is not None or self.store.recovery_required:
             return
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Import Modrinth modpack", "", "Modrinth packs (*.mrpack);;All files (*)"
+            self, title, "", file_filter
         )
         if not filename:
             return
         archive = Path(filename)
-        name = archive.stem.strip() or "Imported Modrinth pack"
+        name = archive.stem.strip() or default_name
         existing_names = {str(item.get("name")) for item in self.state.get("instances", [])}
         base_name = name
         suffix = 2
@@ -982,7 +1013,7 @@ class LauncherWindow(QMainWindow):
             suffix += 1
         instance = {
             "id": str(uuid.uuid4()), "name": name, "version": None, "ready": False,
-            "automatic": False, "provider": "modrinth", "pack_source": str(archive),
+            "automatic": False, "provider": provider, "pack_source": str(archive),
             "install_state": "importing", "install_error": "",
         }
         self.state["instances"].append(instance)
@@ -991,7 +1022,7 @@ class LauncherWindow(QMainWindow):
         self._add_instance_item(instance)
         self.instance_list.setCurrentRow(self.instance_list.count() - 1)
         try:
-            metadata = self.modpack_importer.import_archive(
+            metadata = importer.import_archive(
                 archive, self.store.instance_minecraft_root(instance["id"]),
                 on_progress=self._show_import_progress,
             )
@@ -1000,6 +1031,18 @@ class LauncherWindow(QMainWindow):
                 loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
                 pack_format=metadata["format"], install_state="imported", ready=False, install_error="",
             )
+            if not metadata.get("complete", True):
+                missing = metadata.get("missing_files", [])
+                instance["missing_files"] = missing
+                instance["recovery_action"] = metadata.get("recovery_action", "Retry the import to recover missing files")
+                instance["install_state"] = "incomplete"
+                instance["install_error"] = (
+                    f"Missing {len(missing)} required CurseForge file(s). {instance['recovery_action']}"
+                )
+                self.store.save(self.state)
+                self.instance_status_label.setText(f"Incomplete: {instance['name']} — recovery required")
+                self.diagnostic_hint_label.setText(instance["install_error"])
+                return
             installer_method = getattr(self.installer, "install_modpack", None)
             if not callable(installer_method):
                 raise UnsupportedModrinthPack(
@@ -1017,14 +1060,18 @@ class LauncherWindow(QMainWindow):
                 else f"Incomplete: {instance['name']} — retry preparation"
             )
             self.diagnostic_hint_label.setText("Imported Modrinth pack; Play is available." if ready else instance["install_error"])
-        except (ModrinthPackError, UnsupportedModrinthPack, OSError, RuntimeError) as error:
+        except (ModrinthPackError, UnsupportedModrinthPack, CurseForgePackError, OSError, RuntimeError) as error:
             instance["ready"] = False
             instance["install_state"] = "failed"
-            instance["install_error"] = str(error) or "Modrinth pack import failed"
+            instance["install_error"] = str(error) or f"{provider.title()} pack import failed"
             self.store.save(self.state)
             self.instance_status_label.setText(f"Import failed: {instance['install_error']}")
             self.diagnostic_hint_label.setText(
-                "Choose a supported Modrinth Fabric, Forge, or NeoForge .mrpack and retry the import."
+                (
+                    "Choose a supported CurseForge exported ZIP and retry the import."
+                    if provider == "curseforge"
+                    else "Choose a supported Modrinth Fabric, Forge, or NeoForge .mrpack and retry the import."
+                )
             )
         finally:
             self._refresh_install_button()
@@ -1217,6 +1264,8 @@ class LauncherWindow(QMainWindow):
             self.instance_name_input,
             self.create_instance_button,
             self.install_button,
+            self.import_modpack_button,
+            self.import_curseforge_button,
             self.rename_instance_button,
             self.duplicate_instance_button,
             self.delete_instance_button,
@@ -1514,7 +1563,8 @@ class LauncherWindow(QMainWindow):
             self.play_button.setText("▶  Play")
             return
         available = bool(
-            instance and not self._session_controls_locked and self.install_worker is None and self.game_process is None
+            instance and instance.get("install_state") != "incomplete"
+            and not self._session_controls_locked and self.install_worker is None and self.game_process is None
         )
         self.play_button.setEnabled(available)
         if instance and (instance.get("install_error") or instance.get("install_state") == "interrupted"):
