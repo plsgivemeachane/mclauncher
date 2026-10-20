@@ -68,7 +68,7 @@ class MinecraftHomePanel(QFrame):
 
     @staticmethod
     def bundled_background() -> Path:
-        return Path(__file__).with_name("assets") / "minecraft-home.svg"
+        return Path(__file__).with_name("assets") / "minecraft-home.png"
 
     def set_background(self, filename: str | Path | None) -> None:
         candidates = [Path(filename)] if filename else []
