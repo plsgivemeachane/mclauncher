@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import threading
 import tempfile
 import uuid
@@ -86,6 +87,14 @@ class MinecraftHomePanel(QFrame):
 
     @staticmethod
     def bundled_background() -> Path:
+        executable = Path(sys.executable)
+        executable_candidates = [
+            executable.resolve().parent / "assets" / "minecraft-home.png",
+            executable.parent / "assets" / "minecraft-home.png",
+        ]
+        for candidate in executable_candidates:
+            if candidate.is_file():
+                return candidate
         return Path(__file__).with_name("assets") / "minecraft-home.png"
 
     def set_background(self, filename: str | Path | None) -> None:
@@ -237,25 +246,6 @@ class LauncherWindow(QMainWindow):
         scene_layout = QVBoxLayout(scene)
         scene_layout.setContentsMargins(26, 22, 26, 22)
         scene_layout.addStretch(1)
-        news_overlay = QFrame(scene)
-        news_overlay.setObjectName("newsOverlay")
-        news_layout = QVBoxLayout(news_overlay)
-        news_layout.setContentsMargins(16, 12, 16, 12)
-        news_layout.setSpacing(6)
-        news_heading = QLabel("Minecraft news", news_overlay)
-        news_heading.setObjectName("newsHeading")
-        news_layout.addWidget(news_heading)
-        self.news_cards = QHBoxLayout()
-        self.news_cards.setSpacing(8)
-        news_layout.addLayout(self.news_cards)
-        changelog_heading = QLabel("Launcher changes", news_overlay)
-        changelog_heading.setObjectName("changelogHeading")
-        news_layout.addWidget(changelog_heading)
-        self.launcher_changelog = QLabel(news_overlay)
-        self.launcher_changelog.setObjectName("launcherChangelog")
-        self.launcher_changelog.setWordWrap(True)
-        news_layout.addWidget(self.launcher_changelog)
-        scene_layout.addWidget(news_overlay)
         home_layout.addWidget(scene, 1)
 
         launch_bar = QFrame(root)
@@ -321,10 +311,6 @@ class LauncherWindow(QMainWindow):
         self.selector_empty_label.setText("No matching versions or saved setups")
         self.selector_empty_label.hide()
         launch_layout.addWidget(self.selector_empty_label)
-        self.background_button = QPushButton("Choose background", launch_bar)
-        self.background_button.setObjectName("backgroundButton")
-        self.background_button.clicked.connect(self._choose_background)
-        launch_layout.addWidget(self.background_button)
         home_layout.addWidget(launch_bar)
         self.content_stack.addWidget(self.home_panel)
 
@@ -461,6 +447,25 @@ class LauncherWindow(QMainWindow):
         browse_panel = QWidget(root)
         browse_layout = QVBoxLayout(browse_panel)
         browse_layout.setContentsMargins(26, 20, 26, 20)
+        news_panel = QFrame(browse_panel)
+        news_panel.setObjectName("newsPanel")
+        news_layout = QVBoxLayout(news_panel)
+        news_layout.setContentsMargins(12, 10, 12, 10)
+        news_layout.setSpacing(6)
+        self.news_heading = QLabel("Minecraft news", news_panel)
+        self.news_heading.setObjectName("newsHeading")
+        news_layout.addWidget(self.news_heading)
+        self.news_cards = QHBoxLayout()
+        self.news_cards.setSpacing(8)
+        news_layout.addLayout(self.news_cards)
+        changelog_heading = QLabel("Launcher changes", news_panel)
+        changelog_heading.setObjectName("changelogHeading")
+        news_layout.addWidget(changelog_heading)
+        self.launcher_changelog = QLabel(news_panel)
+        self.launcher_changelog.setObjectName("launcherChangelog")
+        self.launcher_changelog.setWordWrap(True)
+        news_layout.addWidget(self.launcher_changelog)
+        browse_layout.addWidget(news_panel)
         browse_layout.addWidget(QLabel("Modrinth modpacks"))
         browse_search_row = QHBoxLayout()
         self.modrinth_search_input = QLineEdit(browse_panel)
@@ -585,7 +590,7 @@ class LauncherWindow(QMainWindow):
             QLineEdit:focus, QComboBox:focus, QPushButton:focus { border: 2px solid #a6e175; }
             QProgressBar { background: #3a473c; border: 0; border-radius: 2px; height: 4px; }
             QProgressBar::chunk { background: #a6e175; }
-            QFrame#newsOverlay { background: #101712d9; border: 1px solid #536052; border-radius: 10px; }
+            QFrame#newsPanel { background: #101712; border: 1px solid #536052; border-radius: 10px; }
             QLabel#newsHeading, QLabel#changelogHeading { color: #e6f4dc; font-weight: 700; }
             QLabel#newsCard { background: #26352a; border: 1px solid #526452; border-radius: 6px; padding: 8px; color: #eef3e9; }
             QLabel#launcherChangelog { color: #c7d2c9; }
@@ -791,6 +796,10 @@ class LauncherWindow(QMainWindow):
         snapshots = QCheckBox("Show snapshots", dialog)
         snapshots.setChecked(bool(self.state.get("show_snapshots", False)))
         form.addRow("Experimental versions", snapshots)
+        background_button = QPushButton("Choose background", dialog)
+        background_button.setObjectName("settingsBackgroundButton")
+        background_button.clicked.connect(self._choose_background)
+        form.addRow("Home artwork", background_button)
         lifecycle_target = self.game_instance is not None or self.last_game_instance is not None
         target_label = "running game" if self.game_instance is not None else "last game"
         open_folder_text = f"Open {target_label} folder" if lifecycle_target else "Open selected setup folder"

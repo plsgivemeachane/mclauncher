@@ -1,11 +1,13 @@
 import os
+import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
-from mclauncher.app import LauncherWindow
+from mclauncher.app import LauncherWindow, MinecraftHomePanel
 from mclauncher.news import MinecraftNewsFeed, NEWS_FEED_URL
 
 
@@ -39,9 +41,13 @@ def test_news_cards_and_launcher_changelog_are_rendered_and_cached(tmp_path):
     window.show()
     wait_for_news(application, window)
 
+    window.browse_nav_button.click()
     assert "Minecraft Java Edition 26.3" in window.news_cards.itemAt(0).widget().text()
     assert "Launcher changes" in window.launcher_changelog.text() or "mclauncher" in window.launcher_changelog.text()
     assert window.store.load()["news_items"][0]["title"] == "Minecraft Java Edition 26.3"
+    window.home_nav_button.click()
+    assert not window.news_heading.isVisible()
+    assert not window.launcher_changelog.isVisible()
     window.close()
 
 
@@ -59,6 +65,7 @@ def test_cached_news_remains_visible_when_feed_fails(tmp_path):
     second = LauncherWindow(data_root=root, news_provider=NewsProvider(error="offline"))
     second.show()
     wait_for_news(application, second)
+    second.browse_nav_button.click()
     assert "Cached release" in second.news_cards.itemAt(0).widget().text()
     assert second.isVisible()
     second.close()
@@ -69,9 +76,32 @@ def test_empty_or_malformed_feed_keeps_home_usable(tmp_path):
     window = LauncherWindow(data_root=tmp_path / "data", news_provider=NewsProvider(["bad"]))
     window.show()
     wait_for_news(application, window)
+    window.browse_nav_button.click()
     assert "unavailable offline" in window.news_cards.itemAt(0).widget().text()
     assert window.home_artwork.bundled_background().is_file()
     window.close()
+
+
+def test_packaged_executable_background_is_used_for_home_rendering(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    executable_dir = tmp_path / "usr" / "lib" / "mclauncher"
+    asset = executable_dir / "assets" / "minecraft-home.png"
+    asset.parent.mkdir(parents=True)
+    pixmap = QPixmap(8, 8)
+    pixmap.fill("#a6e175")
+    assert pixmap.save(str(asset))
+    monkeypatch.setattr(sys, "executable", str(executable_dir / "mclauncher"))
+
+    panel = MinecraftHomePanel()
+    panel.show()
+    application.processEvents()
+
+    assert panel.bundled_background() == asset
+    panel.set_background(None)
+    rendered = panel.grab().toImage()
+    assert rendered.isNull() is False
+    assert rendered.pixelColor(4, 4).green() > rendered.pixelColor(4, 4).red()
+    panel.close()
 
 
 def test_official_feed_contract_parses_release_article(monkeypatch):

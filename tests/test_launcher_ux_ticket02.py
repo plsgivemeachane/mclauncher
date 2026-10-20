@@ -187,6 +187,8 @@ def test_settings_automatically_saves_memory_and_contains_instance_actions(tmp_p
     labels = {button.text() for button in dialogs[0].findChildren(QPushButton)}
     assert "Open selected setup folder" in labels
     assert "Export diagnostic log" in labels
+    assert "Choose background" in labels
+    assert not window.findChild(QPushButton, "backgroundButton")
     assert not window.memory_input.isVisible()
     window.close()
     application.processEvents()
