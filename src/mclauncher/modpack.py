@@ -411,8 +411,16 @@ class ModrinthPackUpdater:
     def recover(self, instance: dict, minecraft_directory: Path | str) -> None:
         backup = Path(str(instance.get("recovery_backup", "")))
         root = Path(minecraft_directory)
+        journal = root.parent / "update-journal.json"
+        if instance.get("update_recovery_required") and not journal.is_file():
+            instance["install_state"] = "ready"
+            instance["ready"] = True
+            instance["install_error"] = ""
+            instance["update_recovery_required"] = False
+            instance.pop("recovery_backup", None)
+            return
         if not backup.is_dir():
-            if (root.parent / "update-journal.json").is_file():
+            if journal.is_file():
                 raise ModrinthPackUpdateError("The recorded Modrinth update backup is unavailable")
             # Cancellation can happen while replacement files are staged,
             # before a backup journal is published. The live tree is intact.

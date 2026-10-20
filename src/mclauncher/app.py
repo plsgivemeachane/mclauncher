@@ -1305,6 +1305,9 @@ class LauncherWindow(QMainWindow):
             instance["install_state"] = "updating" if updating else "importing"
             instance["ready"] = False
             instance["install_error"] = ""
+            if updating:
+                instance.pop("recovery_backup", None)
+                instance["update_recovery_required"] = False
             self.store.save(self.state)
             self._set_session_controls_locked(True)
             self.modrinth_install_button.setEnabled(False)
@@ -1675,6 +1678,8 @@ class LauncherWindow(QMainWindow):
             instance["install_state"] = "updating"
             instance["install_error"] = ""
             instance["ready"] = False
+            instance.pop("recovery_backup", None)
+            instance["update_recovery_required"] = False
             self.store.save(self.state)
             worker = PackUpdateWorker(
                 self._updater_for_provider(provider), archive, self.store.instance_minecraft_root(instance["id"]), instance,
@@ -2044,7 +2049,11 @@ class LauncherWindow(QMainWindow):
             self._mod_query_request += 1
             request = self._mod_query_request
             self._mod_query_worker = ModQueryWorker(self.modrinth_catalog, "releases", project_id, game_version, loader)
-            self._mod_query_worker.completed.connect(lambda releases, request=request: self._mod_releases_completed(request, releases))
+            instance_id = instance.get("id")
+            self._mod_query_worker.completed.connect(
+                lambda releases, request=request, instance_id=instance_id, game_version=game_version, loader=loader:
+                self._mod_releases_completed(request, instance_id, game_version, loader, releases)
+            )
             self._mod_query_worker.failed.connect(lambda message, request=request: self._mod_releases_failed(request, message))
             self._mod_query_worker.start()
             return
@@ -2061,13 +2070,17 @@ class LauncherWindow(QMainWindow):
         self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
         self.mod_search_status.setText(f"{self.mod_release_selector.count()} compatible release(s) available.")
 
-    def _mod_releases_completed(self, request, releases) -> None:
+    def _mod_releases_completed(self, request, instance_id, game_version, loader, releases) -> None:
         if self._closing or request != self._mod_query_request:
             return
-        self.mod_release_selector.clear()
         instance = self._selected_instance()
-        game_version = instance.get("minecraft_version") or instance.get("version") if instance else ""
-        loader = instance.get("loader") if instance else ""
+        if not instance or instance.get("id") != instance_id:
+            return
+        current_game_version = instance.get("minecraft_version") or instance.get("version")
+        current_loader = instance.get("loader")
+        if current_game_version != game_version or current_loader != loader:
+            return
+        self.mod_release_selector.clear()
         for release in releases:
             if game_version in release.game_versions and loader in release.loaders:
                 self.mod_release_selector.addItem(f"{release.version_number or release.name} · {release.file_name}", release)

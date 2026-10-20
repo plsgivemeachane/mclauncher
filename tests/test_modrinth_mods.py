@@ -1,4 +1,5 @@
 import hashlib
+import threading
 
 import pytest
 
@@ -65,3 +66,22 @@ def test_installer_rejects_duplicate_project_without_writing(tmp_path):
     instance = {"minecraft_version": "1.21.4", "loader": "fabric", "mods": [{"project_id": "main"}]}
     with pytest.raises(ModrinthModInstallError, match="already contains"):
         ModrinthModInstaller(catalog).install(instance, tmp_path / "instance", catalog.main)
+
+
+def test_cancellation_rolls_back_files_already_published(tmp_path, monkeypatch):
+    catalog = Catalog()
+    cancel = threading.Event()
+    import mclauncher.modrinth_mods as module
+    original_copy = module.shutil.copy2
+
+    def copy_then_cancel(source, destination):
+        original_copy(source, destination)
+        cancel.set()
+
+    monkeypatch.setattr(module.shutil, "copy2", copy_then_cancel)
+    with pytest.raises(ModrinthModInstallError, match="cancelled"):
+        ModrinthModInstaller(catalog).install(
+            {"minecraft_version": "1.21.4", "loader": "fabric", "mods": []},
+            tmp_path / "instance", catalog.main, cancel_event=cancel,
+        )
+    assert not list((tmp_path / "instance" / "mods").glob("*.jar"))

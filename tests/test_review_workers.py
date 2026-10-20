@@ -53,3 +53,26 @@ def test_held_catalog_preparation_keeps_timer_responsive_and_close_bounded(tmp_p
     time.sleep(2.1)
     application.processEvents()
     assert not any(item.get("ready") for item in window.state.get("instances", []))
+
+
+def test_async_mod_release_result_is_discarded_after_instance_changes(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    window.instance_name_input.setText("First")
+    window._create_instance()
+    first = window.state["instances"][0]
+    first.update(minecraft_version="1.21.4", loader="fabric")
+    window.instance_name_input.setText("Second")
+    window._create_instance()
+    second = window.state["instances"][1]
+    second.update(minecraft_version="1.21.4", loader="fabric")
+    window.instance_list.setCurrentRow(1)
+    release = ModrinthRelease(
+        "mod-release", "mod-project", "Mod", "1", ("1.21.4",), ("fabric",),
+        "https://cdn.modrinth.test/mod.jar", "mod.jar", "sha1", "sha512",
+    )
+    window._mod_query_request = 1
+    window._mod_releases_completed(1, first["id"], "1.21.4", "fabric", [release])
+    assert window.mod_release_selector.count() == 0
+    window.close()
+    application.processEvents()

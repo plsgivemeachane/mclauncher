@@ -135,9 +135,11 @@ class ModrinthModInstaller:
                     "compatibility_reason": "Modrinth release matches the selected instance game and loader.",
                 })
             return entries
-        except OSError as error:
+        except Exception as error:
             for destination in published:
                 destination.unlink(missing_ok=True)
+            if isinstance(error, ModrinthModInstallError):
+                raise
             raise ModrinthModInstallError(f"Could not publish Modrinth mods: {error}") from error
         finally:
             shutil.rmtree(stage, ignore_errors=True)

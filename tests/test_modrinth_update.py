@@ -117,6 +117,20 @@ def test_update_journal_survives_reopen_until_recovery(tmp_path):
     assert not journal.exists()
 
 
+def test_interrupted_update_without_current_journal_does_not_restore_stale_backup(tmp_path):
+    root = tmp_path / "minecraft"
+    instance = _instance(root)
+    stale = tmp_path / "stale-backup"
+    stale.mkdir()
+    (stale / "mods").mkdir()
+    (stale / "mods" / "wrong.jar").write_bytes(b"wrong")
+    instance.update(recovery_backup=str(stale), update_recovery_required=True, install_state="interrupted", ready=False)
+    ModrinthPackUpdater(FakeImporter()).recover(instance, root)
+    assert (root / "mods" / "pack-old.jar").read_bytes() == b"old"
+    assert not (root / "mods" / "wrong.jar").exists()
+    assert not instance["update_recovery_required"]
+
+
 def test_active_instance_and_import_failure_are_refused(tmp_path):
     root = tmp_path / "minecraft"
     instance = _instance(root)
