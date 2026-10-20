@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from mclauncher import __version__
 from mclauncher.app import LauncherWindow, local_identity
 from mclauncher.installer import MinecraftPlayer
 
@@ -470,6 +471,7 @@ def test_launch_failure_is_saved_for_diagnostics_and_exported(tmp_path, monkeypa
     assert "Play failed: Minecraft files are incomplete" in window.instance_status_label.text()
     assert "Saved diagnostic log" in window.diagnostic_hint_label.text()
     log = output.read_text(encoding="utf-8")
+    assert f"Launcher version: {__version__}" in log
     assert "Instance: Survival" in log
     assert "Version: 1.21.4" in log
     assert "Minecraft files are incomplete" in log
@@ -655,3 +657,4 @@ def test_player_build_command_uses_pinned_identity_runtime_and_instance_director
     assert captured["options"]["token"] == ""
     assert captured["options"]["executablePath"] == str(executable)
     assert captured["options"]["gameDirectory"] == str(tmp_path)
+    assert captured["options"]["launcherVersion"] == __version__

@@ -8,7 +8,7 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 PY_SIDE_VERSION=${PY_SIDE_VERSION:-6.12.0}
 MLL_VERSION=${MLL_VERSION:-8.0}
 CONSTRAINTS="$ROOT/packaging/constraints.txt"
-APP_VERSION=$("$PYTHON_BIN" -c 'import pathlib, sys, tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["project"]["version"])' "$ROOT/pyproject.toml")
+APP_VERSION=$(PYTHONPATH="$ROOT/src" "$PYTHON_BIN" -c 'from mclauncher import __version__; print(__version__)')
 PACKAGE=mclauncher
 
 cleanup_deploy_outputs() {

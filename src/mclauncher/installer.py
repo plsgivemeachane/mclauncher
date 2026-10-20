@@ -11,6 +11,8 @@ from typing import Callable
 import minecraft_launcher_lib
 from PySide6.QtCore import QObject, QTimer
 
+from . import __version__
+
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
@@ -123,7 +125,7 @@ class MinecraftPlayer:
             "executablePath": executable,
             "gameDirectory": str(game_directory),
             "launcherName": "mclauncher",
-            "launcherVersion": "0.1.0",
+            "launcherVersion": __version__,
         }
         if memory_gib is not None:
             options["jvmArguments"] = [f"-Xmx{memory_gib}G", f"-Xms{memory_gib}G"]

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
 from .persistence import LauncherStore
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .memory import default_memory_gib, validate_memory_gib
@@ -841,7 +842,7 @@ class LauncherWindow(QMainWindow):
             log_tail = f"(unavailable: {error})"
         lines = [
             "Minecraft Launcher diagnostic log",
-            "Launcher version: 0.1.0",
+            f"Launcher version: {__version__}",
             f"Generated: {datetime.now(timezone.utc).isoformat()}",
             f"Launcher data root: {self.store.root}",
             "",
