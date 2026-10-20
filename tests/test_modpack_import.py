@@ -122,3 +122,27 @@ def test_installer_checks_exact_forge_pair_and_records_launcher_profile(tmp_path
             {"loader": "forge", "game_version": "1.21.4", "loader_version": "47.3.1"},
             lambda *_args: None,
         )
+
+
+def test_importer_accepts_exact_neoforge_pair_from_loader_resolver(tmp_path):
+    _pack(tmp_path / "neoforge.mrpack", dependency="neoforge")
+    calls = []
+
+    def resolve(game, loader, version):
+        calls.append((game, loader, version))
+        return {"loader": loader, "game_version": game, "loader_version": version}
+
+    result = ModrinthPackImporter(
+        download=lambda _url: b"jar", loader_resolver=resolve
+    ).import_archive(tmp_path / "neoforge.mrpack", tmp_path / "neoforge")
+
+    assert calls == [("1.21.4", "neoforge", "0.16.9")]
+    assert result["loader"] == "neoforge"
+
+
+def test_importer_fails_closed_when_neoforge_pair_is_unavailable(tmp_path):
+    _pack(tmp_path / "neoforge.mrpack", dependency="neoforge")
+    with pytest.raises(UnsupportedModrinthPack, match="NeoForge.*unavailable"):
+        ModrinthPackImporter(
+            download=lambda _url: b"jar", loader_resolver=lambda *_args: None
+        ).import_archive(tmp_path / "neoforge.mrpack", tmp_path / "neoforge")

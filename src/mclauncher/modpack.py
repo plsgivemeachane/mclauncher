@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import urllib.request
+import inspect
 from urllib.parse import urlparse
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -29,7 +30,7 @@ class UnsupportedModrinthPack(ModrinthPackError):
 
 Progress = Callable[[str, int, int], None]
 Download = Callable[[str], bytes]
-LoaderResolver = Callable[[str, str], object]
+LoaderResolver = Callable[..., object]
 
 
 def _safe_relative_path(value: object, *, label: str) -> PurePosixPath:
@@ -103,12 +104,32 @@ class ModrinthPackImporter:
         if len(loaders) != 1:
             raise UnsupportedModrinthPack("The pack must declare exactly one supported client loader")
         loader, version = loaders[0]
-        loader_names = {"fabric-loader": "Fabric", "forge": "Forge"}
-        if loader not in loader_names or not isinstance(version, str) or not version:
+        supported_loaders = {
+            "fabric-loader": "fabric",
+            "forge": "forge",
+            "neoforge": "neoforge",
+        }
+        loader_names = {"fabric-loader": "Fabric", "forge": "Forge", "neoforge": "NeoForge"}
+        if loader not in supported_loaders or not isinstance(version, str) or not version:
             raise UnsupportedModrinthPack(f"Modrinth loader {loader!r} is not supported yet")
+        if loader == "forge" and self.loader_resolver is None:
+            raise UnsupportedModrinthPack(
+                f"Forge {version} is not supported: cannot be verified from official metadata for Minecraft {game}"
+            )
+        if loader == "neoforge" and self.loader_resolver is None:
+            raise UnsupportedModrinthPack(
+                f"{loader_names[loader]} {version} is unavailable for Minecraft {game}; exact support metadata is required"
+            )
         if self.loader_resolver is not None:
             try:
-                profile = self.loader_resolver(game, version)
+                # Keep the pre-NeoForge two-argument injection seam working while
+                # allowing the resolver to distinguish loader families.
+                parameters = inspect.signature(self.loader_resolver).parameters
+                positional = [p for p in parameters.values() if p.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD
+                )]
+                accepts_loader = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in parameters.values()) or len(positional) >= 3
+                profile = self.loader_resolver(game, loader, version) if accepts_loader else self.loader_resolver(game, version)
             except Exception as error:
                 name = loader_names[loader]
                 raise UnsupportedModrinthPack(
@@ -117,11 +138,7 @@ class ModrinthPackImporter:
             if profile is False or profile is None:
                 name = loader_names[loader]
                 raise UnsupportedModrinthPack(f"{name} {version} is unavailable for Minecraft {game}")
-        elif loader == "forge":
-            raise UnsupportedModrinthPack(
-                f"Forge {version} for Minecraft {game} is not supported: cannot be verified from official metadata"
-            )
-        return game, version, loader
+        return game, version, supported_loaders[loader]
 
     def import_archive(
         self,
@@ -191,7 +208,7 @@ class ModrinthPackImporter:
                 "provider": "modrinth",
                 "format": "mrpack",
                 "game_version": game,
-                "loader": "forge" if loader_id == "forge" else "fabric",
+                "loader": loader_id,
                 "loader_version": loader_version,
                 "installed_files": sorted(set(installed)),
                 "manifest": manifest,
