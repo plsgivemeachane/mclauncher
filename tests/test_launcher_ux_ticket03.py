@@ -254,3 +254,33 @@ def test_repeated_play_clicks_start_one_install_and_one_launch(tmp_path):
     assert len(installer.calls) == 1
     assert len(player.calls) == 1
     window.close()
+
+
+def test_home_and_instances_navigation_exposes_saved_setup_page(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data", installer=ReleaseInstaller(("1.21.4",)))
+    window.show()
+    _process(application, window)
+
+    assert window.home_nav_button.isVisible()
+    assert window.instances_nav_button.isVisible()
+    assert window.content_stack.currentIndex() == 0
+    window.instances_nav_button.click()
+    assert window.content_stack.currentIndex() == 1
+    window.home_nav_button.click()
+    assert window.content_stack.currentIndex() == 0
+    window.close()
+
+
+def test_bundled_background_survives_missing_custom_path(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "state.json").write_text('{"username":"Alex","background_path":"/missing/image.png"}')
+    window = LauncherWindow(data_root=data, installer=ReleaseInstaller(("1.21.4",)))
+    window.show()
+    _process(application, window)
+
+    assert window.home_artwork.bundled_background().is_file()
+    assert not window.home_artwork._background.isNull()
+    window.close()

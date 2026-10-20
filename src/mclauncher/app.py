@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal, QPoint
-from PySide6.QtGui import QDesktopServices, QPainter
+from PySide6.QtGui import QDesktopServices, QPainter, QPixmap, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -53,35 +54,50 @@ def local_identity(username: str) -> str:
     return str(uuid.UUID(digest[:32]))
 
 
-class LandscapePanel(QFrame):
-    """Small block landscape that keeps the launch surface visually quiet."""
+class MinecraftHomePanel(QFrame):
+    """Minecraft artwork panel with a bundled, offline-safe fallback."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("landscapePanel")
+        self.setObjectName("minecraftHomePanel")
         self.setMinimumHeight(120)
+        self._background = QPixmap()
+        self.set_background(None)
+
+    @staticmethod
+    def bundled_background() -> Path:
+        return Path(__file__).with_name("assets") / "minecraft-home.svg"
+
+    def set_background(self, filename: str | Path | None) -> None:
+        candidates = [Path(filename)] if filename else []
+        candidates.append(self.bundled_background())
+        self._background = QPixmap()
+        for candidate in candidates:
+            if candidate.is_file():
+                pixmap = QPixmap(str(candidate))
+                if not pixmap.isNull():
+                    self._background = pixmap
+                    break
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
         del event
         painter = QPainter(self)
         width, height = self.width(), self.height()
-        painter.fillRect(self.rect(), "#9bbbaa")
-        painter.fillRect(0, int(height * 0.52), width, int(height * 0.48), "#537d68")
-        painter.fillRect(0, int(height * 0.69), width, int(height * 0.31), "#416750")
-        painter.setPen("#9bbba0")
-        painter.setBrush("#7f9d8c")
-        painter.drawPolygon([QPoint(0, int(height * .55)), QPoint(int(width * .12), int(height * .34)),
-                             QPoint(int(width * .25), int(height * .50)), QPoint(int(width * .39), int(height * .28)),
-                             QPoint(int(width * .56), int(height * .52)), QPoint(int(width * .72), int(height * .32)),
-                             QPoint(width, int(height * .52)), QPoint(width, int(height * .7)), QPoint(0, int(height * .7))])
-        painter.setPen("#5b5840")
-        for x, scale in ((50, 1.0), (150, .7), (width - 120, .8), (width - 45, 1.1)):
-            trunk = max(5, int(10 * scale))
-            painter.drawRect(x - trunk // 2, int(height * .52), trunk, int(height * .25))
-            painter.setBrush("#284d3d")
-            painter.drawRect(x - int(28 * scale), int(height * .34), int(56 * scale), int(30 * scale))
-            painter.drawRect(x - int(20 * scale), int(height * .25), int(40 * scale), int(25 * scale))
+        if self._background.isNull():
+            painter.fillRect(self.rect(), "#263b30")
+        else:
+            scaled = self._background.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                             Qt.TransformationMode.SmoothTransformation)
+            x = (scaled.width() - width) // 2
+            y = (scaled.height() - height) // 2
+            painter.drawPixmap(0, 0, scaled, x, y, width, height)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 80))
         painter.end()
+
+
+# Kept as an import-compatible name for callers from the original launcher.
+LandscapePanel = MinecraftHomePanel
 
 
 class LauncherWindow(QMainWindow):
@@ -111,6 +127,8 @@ class LauncherWindow(QMainWindow):
         self.game_poll_timer.setInterval(500)
         self.game_poll_timer.timeout.connect(self._poll_adopted_game)
         self._waiting_for_game_lock = False
+        self.home_panel = None
+        self.content_stack = None
         self._closing = False
         self.state = self.store.load()
         self._build_ui()
@@ -137,8 +155,28 @@ class LauncherWindow(QMainWindow):
         header_layout.addWidget(self.settings_button)
         layout.addWidget(header)
 
-        scene = LandscapePanel(root)
-        layout.addWidget(scene, 1)
+        navigation = QFrame(root)
+        navigation.setObjectName("navigationBar")
+        navigation_layout = QHBoxLayout(navigation)
+        navigation_layout.setContentsMargins(25, 4, 25, 4)
+        self.home_nav_button = QPushButton("Home", navigation)
+        self.home_nav_button.setObjectName("homeNavButton")
+        self.instances_nav_button = QPushButton("Instances", navigation)
+        self.instances_nav_button.setObjectName("instancesNavButton")
+        self.home_nav_button.clicked.connect(lambda: self._show_page(0))
+        self.instances_nav_button.clicked.connect(lambda: self._show_page(1))
+        navigation_layout.addWidget(self.home_nav_button)
+        navigation_layout.addWidget(self.instances_nav_button)
+        navigation_layout.addStretch(1)
+        layout.addWidget(navigation)
+
+        self.content_stack = QStackedWidget(root)
+        self.home_panel = QWidget(root)
+        home_layout = QVBoxLayout(self.home_panel)
+        home_layout.setContentsMargins(0, 0, 0, 0)
+        scene = MinecraftHomePanel(self.home_panel)
+        self.home_artwork = scene
+        home_layout.addWidget(scene, 1)
 
         launch_bar = QFrame(root)
         launch_bar.setObjectName("launchBar")
@@ -203,12 +241,17 @@ class LauncherWindow(QMainWindow):
         self.selector_empty_label.setText("No matching versions or saved setups")
         self.selector_empty_label.hide()
         launch_layout.addWidget(self.selector_empty_label)
-        layout.addWidget(launch_bar)
+        self.background_button = QPushButton("Choose background", launch_bar)
+        self.background_button.setObjectName("backgroundButton")
+        self.background_button.clicked.connect(self._choose_background)
+        launch_layout.addWidget(self.background_button)
+        home_layout.addWidget(launch_bar)
+        self.content_stack.addWidget(self.home_panel)
 
         legacy_panel = QWidget(root)
         legacy_layout = QVBoxLayout(legacy_panel)
         legacy_layout.setContentsMargins(0, 0, 0, 0)
-        legacy_panel.hide()
+        self.instances_panel = legacy_panel
 
         identity_form = QFormLayout()
         self.save_username_button = QPushButton("Save username")
@@ -296,9 +339,11 @@ class LauncherWindow(QMainWindow):
         self.install_button.setObjectName("installButton")
         self.install_button.clicked.connect(self._install_selected_instance)
         legacy_layout.addWidget(self.install_button)
-        layout.addWidget(legacy_panel)
+        self.content_stack.addWidget(legacy_panel)
+        layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
         self._apply_compact_theme()
+        self._show_page(0)
 
     def _apply_compact_theme(self) -> None:
         self.resize(920, 560)
@@ -306,6 +351,8 @@ class LauncherWindow(QMainWindow):
         self.setStyleSheet("""
             QWidget { background: #161b19; color: #eef3e9; }
             QFrame#titleBar { background: #172019; }
+            QFrame#navigationBar { background: #172019; }
+            QPushButton#homeNavButton[active="true"], QPushButton#instancesNavButton[active="true"] { background: #2c3d30; color: #e6f4dc; }
             QLabel#brandLabel { color: #c5cfc7; font-size: 15px; font-weight: 650; }
             QFrame#launchBar { background: #1b231e; }
             QLabel#usernameFieldLabel, QLabel#setupFieldLabel { color: #a7b3a9; font-size: 11px; }
@@ -322,7 +369,6 @@ class LauncherWindow(QMainWindow):
             QProgressBar { background: #3a473c; border: 0; border-radius: 2px; height: 4px; }
             QProgressBar::chunk { background: #a6e175; }
         """)
-        self.instance_list.hide()
         self.save_username_button.hide()
         self.save_memory_button.hide()
         self.identity_label.hide()
@@ -330,9 +376,37 @@ class LauncherWindow(QMainWindow):
         self.memory_setting_error.hide()
         self.username_warning.setStyleSheet("color: #e7c17a;")
         self.confirm_username_change_button.hide()
-        self.instance_name_input.hide()
-        self.create_instance_button.hide()
-        self.install_button.hide()
+        self.home_nav_button.setProperty("active", True)
+
+    def _show_page(self, index: int) -> None:
+        if self.content_stack is None:
+            return
+        index = 0 if index not in (0, 1) else index
+        self.content_stack.setCurrentIndex(index)
+        self.home_nav_button.setProperty("active", index == 0)
+        self.instances_nav_button.setProperty("active", index == 1)
+        for button in (self.home_nav_button, self.instances_nav_button):
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _choose_background(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Choose Minecraft background", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp *.svg)"
+        )
+        if not filename:
+            return
+        candidate = Path(filename)
+        pixmap = QPixmap(str(candidate))
+        if pixmap.isNull():
+            self.diagnostic_hint_label.setText(
+                "That image could not be loaded; the bundled background is still active."
+            )
+            return
+        self.home_artwork.set_background(candidate)
+        self.state["background_path"] = str(candidate)
+        if not self.store.recovery_required:
+            self.store.save(self.state)
+        self.diagnostic_hint_label.setText("Custom background saved.")
 
     def _select_setup_from_selector(self, index: int) -> None:
         if index < 0 or index >= self.setup_selector.count():
@@ -495,6 +569,7 @@ class LauncherWindow(QMainWindow):
         self.state.setdefault("available_versions", [])
         self.state.setdefault("available_version_metadata", [])
         self.state.setdefault("show_snapshots", False)
+        self.state.setdefault("background_path", "")
         if "memory_gib" not in self.state and not self.store.recovery_required:
             self.state["memory_gib"] = default_memory_gib()
             self.store.save(self.state)
@@ -502,6 +577,7 @@ class LauncherWindow(QMainWindow):
         username = str(self.state.get("username", ""))
         self.username_input.setText(username)
         self._update_identity(username)
+        self.home_artwork.set_background(self.state.get("background_path") or None)
         state_changed = False
         for instance in self.state.get("instances", []):
             if isinstance(instance, dict) and instance.get("name") and instance.get("id"):
