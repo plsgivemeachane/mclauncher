@@ -129,7 +129,7 @@ LandscapePanel = MinecraftHomePanel
 
 class LauncherWindow(QMainWindow):
     def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
-                 modpack_importer=None, news_provider=None, modrinth_catalog=None, optifine_installer=None,
+                 modpack_importer=None, modrinth_catalog=None, optifine_installer=None,
                  curseforge_importer=None, mod_installer=None, modrinth_updater=None,
                  curseforge_updater=None) -> None:
         super().__init__()
@@ -164,9 +164,6 @@ class LauncherWindow(QMainWindow):
         self.install_worker = None
         self.installing_instance = None
         self.discovery_worker = None
-        # ``news_provider`` remains accepted for callers upgrading from older
-        # releases, but news is no longer part of the launcher product.
-        del news_provider
         self._launch_after_prepare = False
         self._operation_instance_id = None
         self._operation_selector_value = None
