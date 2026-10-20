@@ -327,6 +327,7 @@ class ModrinthPackUpdater:
         backup = backup_root / f"{instance.get('id', 'instance')}-{time.time_ns()}"
         journal = root.parent / "update-journal.json"
         old_files = {str(path) for path in instance.get("installed_files", []) if isinstance(path, str)}
+        previous_instance = dict(instance)
         try:
             import_kwargs = {"cancel_event": cancel_event, "on_progress": progress}
             if replacements is not None:
@@ -364,7 +365,8 @@ class ModrinthPackUpdater:
             journal.write_text(json.dumps({
                 "provider": metadata.get("provider", instance.get("provider", "modrinth")),
                 "instance_id": instance.get("id", ""), "backup": str(backup),
-                "archive": str(archive_path),
+                "archive": str(archive_path), "phase": "backed_up",
+                "previous_instance": previous_instance,
             }) + "\n", encoding="utf-8")
             progress("Backed up current instance", 0, 1)
             if cancel_event is not None and cancel_event.is_set():
@@ -391,7 +393,6 @@ class ModrinthPackUpdater:
             )
             if release_id:
                 instance["pack_release_id"] = release_id
-            journal.unlink(missing_ok=True)
             return {"metadata": metadata, "backup": str(backup), "local_files": local_names}
         except Exception as error:
             if backup.is_dir():
@@ -429,8 +430,16 @@ class ModrinthPackUpdater:
             instance["install_error"] = ""
             instance["update_recovery_required"] = False
             return
+        try:
+            journal_data = json.loads(journal.read_text(encoding="utf-8")) if journal.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            journal_data = {}
         self._copy_tree(backup, root)
-        (root.parent / "update-journal.json").unlink(missing_ok=True)
+        journal.unlink(missing_ok=True)
+        previous_instance = journal_data.get("previous_instance") if isinstance(journal_data, dict) else None
+        if isinstance(previous_instance, dict):
+            instance.clear()
+            instance.update(previous_instance)
         instance["install_state"] = "ready"
         instance["ready"] = True
         instance["install_error"] = ""

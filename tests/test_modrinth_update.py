@@ -97,10 +97,13 @@ def test_failure_restores_live_tree_and_recovery_restores_backup(tmp_path):
         return True
 
     updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=cancel)
+    assert (root.parent / "update-journal.json").is_file()
     (root / "mods" / "pack-new.jar").write_bytes(b"damaged")
     updater.recover(instance, root)
     assert (root / "mods" / "pack-old.jar").read_bytes() == b"old"
     assert not (root / "mods" / "pack-new.jar").exists()
+    assert instance["installed_files"] == ["mods/pack-old.jar"]
+    assert not (root.parent / "update-journal.json").exists()
 
 
 def test_update_journal_survives_reopen_until_recovery(tmp_path):

@@ -72,6 +72,8 @@ def test_async_mod_release_result_is_discarded_after_instance_changes(tmp_path):
         "https://cdn.modrinth.test/mod.jar", "mod.jar", "sha1", "sha512",
     )
     window._mod_query_request = 1
+    window._mod_search_completed(1, first["id"], "1.21.4", "fabric", [{"project_id": "stale"}])
+    assert window.mod_search_results.count() == 0
     window._mod_releases_completed(1, first["id"], "1.21.4", "fabric", [release])
     assert window.mod_release_selector.count() == 0
     window.close()

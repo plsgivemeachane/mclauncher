@@ -85,3 +85,20 @@ def test_cancellation_rolls_back_files_already_published(tmp_path, monkeypatch):
             tmp_path / "instance", catalog.main, cancel_event=cancel,
         )
     assert not list((tmp_path / "instance" / "mods").glob("*.jar"))
+
+
+def test_partial_publish_io_failure_removes_destination(tmp_path, monkeypatch):
+    catalog = Catalog()
+    import mclauncher.modrinth_mods as module
+
+    def partial_copy(_source, destination):
+        destination.write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module.shutil, "copy2", partial_copy)
+    with pytest.raises(ModrinthModInstallError, match="publish"):
+        ModrinthModInstaller(catalog).install(
+            {"minecraft_version": "1.21.4", "loader": "fabric", "mods": []},
+            tmp_path / "instance", catalog.main,
+        )
+    assert not (tmp_path / "instance" / "mods" / "main.jar").exists()

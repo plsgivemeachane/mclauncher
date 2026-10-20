@@ -1349,6 +1349,7 @@ class LauncherWindow(QMainWindow):
             if self._catalog_worker.updating:
                 instance.update(self._catalog_worker.instance_result)
                 self.store.save(self.state)
+                (self.store.instance_root(instance["id"]) / "update-journal.json").unlink(missing_ok=True)
                 self.modrinth_catalog_status.setText(f"Updated {title} {release.version_number or release.name}.")
             else:
                 self._finish_pack_install(instance, self._catalog_worker.metadata, self._catalog_worker.instance_result, title)
@@ -1717,6 +1718,7 @@ class LauncherWindow(QMainWindow):
                 raise ModrinthPackUpdateError("Updated files are incomplete; recover from the recorded backup")
             instance["install_state"] = "ready"
             self.store.save(self.state)
+            (self.store.instance_root(instance["id"]) / "update-journal.json").unlink(missing_ok=True)
             self.instance_status_label.setText(f"Updated: {instance['name']}")
             self.diagnostic_hint_label.setText(f"Update complete; backup saved at {result['backup']}")
         except (ModrinthPackUpdateError, ModrinthPackError, OSError, RuntimeError) as error:
@@ -1740,6 +1742,7 @@ class LauncherWindow(QMainWindow):
         instance = self._update_worker_instance
         instance.update(self._update_worker.instance_result)
         self.store.save(self.state)
+        (self.store.instance_root(instance["id"]) / "update-journal.json").unlink(missing_ok=True)
         self.instance_status_label.setText(f"Updated: {instance['name']}")
         self.diagnostic_hint_label.setText("Update complete; the previous release is backed up.")
         self._set_session_controls_locked(False)
@@ -1990,8 +1993,12 @@ class LauncherWindow(QMainWindow):
                 self._mod_query_worker.cancel()
             self._mod_query_request += 1
             request = self._mod_query_request
+            instance_id = instance.get("id")
             self._mod_query_worker = ModQueryWorker(self.modrinth_catalog, "search", query, game_version, loader)
-            self._mod_query_worker.completed.connect(lambda results, request=request: self._mod_search_completed(request, results))
+            self._mod_query_worker.completed.connect(
+                lambda results, request=request, instance_id=instance_id, game_version=game_version, loader=loader:
+                self._mod_search_completed(request, instance_id, game_version, loader, results)
+            )
             self._mod_query_worker.failed.connect(lambda message, request=request: self._mod_search_failed(request, message))
             self._mod_query_worker.start()
             return
@@ -2013,8 +2020,14 @@ class LauncherWindow(QMainWindow):
             f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched."
         )
 
-    def _mod_search_completed(self, request, results) -> None:
+    def _mod_search_completed(self, request, instance_id, game_version, loader, results) -> None:
         if self._closing or request != self._mod_query_request:
+            return
+        instance = self._selected_instance()
+        if not instance or instance.get("id") != instance_id:
+            return
+        current_game_version = instance.get("minecraft_version") or instance.get("version")
+        if current_game_version != game_version or instance.get("loader") != loader:
             return
         self.mod_search_results.clear()
         self.mod_release_selector.clear()

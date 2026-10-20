@@ -118,8 +118,8 @@ class ModrinthModInstaller:
                 if cancel_event is not None and cancel_event.is_set():
                     raise ModrinthModInstallError("Mod installation cancelled")
                 destination = mods_dir / filename
-                shutil.copy2(stage / filename, destination)
                 published.append(destination)
+                shutil.copy2(stage / filename, destination)
                 entries.append({
                     "id": f"modrinth:{candidate.project_id}:{candidate.id}",
                     "project_id": candidate.project_id,
