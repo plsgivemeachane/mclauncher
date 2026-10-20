@@ -1,6 +1,6 @@
 # Ticket 07 package acceptance evidence
 
-Snapshot: `43275099a712f2c70ab8516a181833453ecc46fd` (`ticket/launcher-ux-07-package-acceptance`)
+Integrated source: `be9b12ef36cc3ae69b57511f0f6d5051f50ceaf9` (`integration/launcher-ux-merge-07`).
 
 ## Automated checks
 
@@ -8,86 +8,53 @@ Command:
 
 ```sh
 TMPDIR=/tmp QT_QPA_PLATFORM=offscreen \
-  /tmp/mclauncher-ux-venv/bin/python -m pytest -q
+  /tmp/mclauncher-ux-venv/bin/python -m pytest -x -q
 ```
 
-Result: `73 passed in 2.70s`.
+Result: `80 passed in 3.55s`.
 
-## Reproducible package build
+`git diff --check 4327509...HEAD` also passed before this evidence update.
 
-Command from `packaging/README.md`:
+## Clean Ubuntu 24.04 package build
 
-```sh
-docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src ubuntu:24.04 \
-  sh -eu -c 'apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates dpkg-dev file patchelf python3 python3-venv python3-dev \
-    build-essential libgl1 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
-    libx11-6 libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 \
-    libwayland-cursor0 libwayland-egl1 libgbm1 libbrotli1 \
-    libxcb-cursor0 libxcb-icccm4 libxcb-util1 libxcb-keysyms1 libxcb-image0 \
-    libxcb-render-util0 libxcb-shape0 libxcb-randr0 libxcb-xinerama0 \
-    libxcb-xkb1 libkrb5-3 libgssapi-krb5-2 && \
-    SOURCE_DATE_EPOCH=0 packaging/build-deb.sh'
-```
+The documented `packaging/build-deb.sh` flow completed in a clean Ubuntu
+24.04 amd64 Docker container using `SOURCE_DATE_EPOCH=0`. It produced
+`dist/mclauncher_0.1.0_amd64.deb` from the integrated source above.
 
-Result: **blocked** while downloading the pinned `pyside6_addons-6.12.0` wheel
-(`2.6 MB/59.2 MB`, `Connection timed out`, `incomplete-download`). The clean
-attempt produced no new `.deb`; the full log is retained at
-`/tmp/mclauncher-ux-07-evidence/docker-build.txt`.
-
-## Available artifact inspection (fallback only)
-
-The shared repository contained a pre-existing artifact, not produced by the
-failed build above:
+Package identity and build metadata:
 
 ```text
-dist/mclauncher_0.1.0_amd64.deb
-sha256 304b83ef03b02316b74aa6840d84609b5f5ee3ffb599c695e2c387dd0a253dfb
-size 44064956 bytes
-architecture amd64
-Build Python 3.12.3
-PySide6 6.12.0
-minecraft-launcher-lib 8.0
-Source date epoch 0
+Package: mclauncher
+Version: 0.1.0
+Architecture: amd64
+Size: 44,226,224 bytes
+SHA-256: 60c455ea0e19aea4fff1ab0ec6b57f9665020e65b0c882fc28d308d975bcf11b
+Build Python: 3.12.3
+Pinned PySide6: 6.12.0
+Pinned minecraft-launcher-lib: 8.0
+Source date epoch: 0
 ```
 
-`dpkg-deb --info` showed runtime library dependencies only; no Python or Java
-dependency is declared. The package contains the frozen ELF launcher,
-`minecraft_launcher_lib/version.txt`, build metadata, and the desktop entry.
-The desktop entry has:
+The installed desktop entry declares `Exec=/usr/bin/mclauncher` and
+`TryExec=/usr/bin/mclauncher`. The package installed successfully with apt in a
+clean Ubuntu 24.04 amd64 container; no Python or Java package was installed
+separately. Running the installed executable under Xvfb remained alive for the
+20-second smoke window. `gtk-launch mclauncher` also opened the installed
+desktop entry and produced a `Minecraft Launcher` Qt window. The window was
+920 × 560; its captured idle screen is
+[evidence/07-package-idle-920x560.png](evidence/07-package-idle-920x560.png).
 
-```text
-Exec=/usr/bin/mclauncher
-TryExec=/usr/bin/mclauncher
-```
+## Gameplay acceptance blocker
 
-The frozen executable is ELF64 x86-64 and `ldd` resolves only native system
-libraries plus bundled `libexpat`; no Python or Java runtime is bundled or
-required by the executable.
+The packaged launcher opened, but version discovery failed against the clean
+container's network path with `CERTIFICATE_VERIFY_FAILED` (a self-signed
+certificate in the certificate chain). No version list was available, so the
+real Minecraft download, Java preparation, world creation/save, offline
+relaunch, and world reopen journey could not be reached. TLS verification was
+left enabled. This environment result does not establish a product-side TLS
+defect or successful gameplay.
 
-## GUI smoke
-
-The extracted frozen executable from the fallback artifact was run under host
-Xvfb:
-
-```sh
-HOME=/tmp/mclauncher-ux-07-package-home QT_QPA_PLATFORM=xcb \
-  xvfb-run -a -s '-screen 0 1280x800x24' timeout 12s \
-  /tmp/mclauncher-ux-07-package-files/usr/lib/mclauncher/mclauncher
-```
-
-Result: exit `124` from `timeout`; the process stayed alive for the full 12
-seconds. No GUI crash output was emitted. This is a frozen-binary smoke, not
-proof of desktop-entry execution from an installed Ubuntu 24.04 system.
-
-## Unresolved package acceptance gaps
-
-- A fresh Ubuntu 24.04 amd64 build from this snapshot is unproven because the
-  pinned wheel download timed out.
-- Installation through `apt install ./dist/mclauncher_0.1.0_amd64.deb` in a
-  clean Ubuntu 24.04 container was attempted, but the container stalled while
-  fetching the 58.5 MB Xvfb test dependencies. No clean-container install
-  verdict is claimed.
-- The host-Xvfb smoke cannot prove the complete desktop integration, real
-  Minecraft download, Java runtime, world save, disconnected reopen, or
-  graphics acceptance journey. Those remain ticket 07 manual acceptance work.
+The real desktop graphics journey, legacy-world verification, secondary
+version/snapshot journey, lifecycle demonstrations, and multi-state visual
+comparison also remain outstanding. Automated tests cover deterministic
+launcher behavior; they do not substitute for those player-visible checks.
