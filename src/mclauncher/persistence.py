@@ -96,6 +96,13 @@ class LauncherStore:
             return self._invalid_state("available_version_metadata must contain version records")
         if not isinstance(value.get("show_snapshots", False), bool):
             return self._invalid_state("show_snapshots must be a boolean")
+        if not isinstance(value.get("news_items", []), list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("title", ""), str)
+            or not isinstance(item.get("url", ""), str)
+            for item in value.get("news_items", [])
+        ):
+            return self._invalid_state("news_items must contain article records")
         if "memory_gib" in value and (isinstance(value["memory_gib"], bool) or not isinstance(value["memory_gib"], int)):
             return self._invalid_state("memory_gib must be an integer")
         for instance in value.get("instances", []):
