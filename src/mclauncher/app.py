@@ -48,6 +48,7 @@ from .modpack import (
     UnsupportedModrinthPack,
 )
 from .modrinth_catalog import ModrinthCatalog, ModrinthCatalogError, ModrinthRelease
+from .modrinth_mods import ModrinthModInstallError, ModrinthModInstaller
 from .news import MinecraftNewsFeed
 from .optifine import OptiFineError, OptiFineInstaller
 from .localmods import copy_mod_to_instance, inspect_mod_jar
@@ -118,7 +119,7 @@ LandscapePanel = MinecraftHomePanel
 class LauncherWindow(QMainWindow):
     def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
                  modpack_importer=None, news_provider=None, modrinth_catalog=None, optifine_installer=None,
-                 curseforge_importer=None) -> None:
+                 curseforge_importer=None, mod_installer=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
@@ -131,6 +132,7 @@ class LauncherWindow(QMainWindow):
             loader_resolver=getattr(self.installer, "resolve_loader", None)
         )
         self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
+        self.mod_installer = mod_installer or ModrinthModInstaller(self.modrinth_catalog)
         self._catalog_results = []
         self._catalog_releases = []
         self._catalog_installing = False
@@ -478,6 +480,32 @@ class LauncherWindow(QMainWindow):
         self.mods_warning_label.setObjectName("modsWarningLabel")
         self.mods_warning_label.setWordWrap(True)
         mods_layout.addWidget(self.mods_warning_label)
+        mod_search_row = QHBoxLayout()
+        self.mod_search_input = QLineEdit(mods_panel)
+        self.mod_search_input.setObjectName("modSearchInput")
+        self.mod_search_input.setPlaceholderText("Search Modrinth mods for this instance")
+        self.mod_search_button = QPushButton("Search Modrinth", mods_panel)
+        self.mod_search_button.setObjectName("modSearchButton")
+        self.mod_search_button.clicked.connect(self._search_modrinth_mods)
+        mod_search_row.addWidget(self.mod_search_input, 1)
+        mod_search_row.addWidget(self.mod_search_button)
+        mods_layout.addLayout(mod_search_row)
+        self.mod_search_results = QListWidget(mods_panel)
+        self.mod_search_results.setObjectName("modSearchResults")
+        self.mod_search_results.currentItemChanged.connect(self._select_modrinth_mod)
+        mods_layout.addWidget(self.mod_search_results)
+        self.mod_release_selector = QComboBox(mods_panel)
+        self.mod_release_selector.setObjectName("modReleaseSelector")
+        mods_layout.addWidget(self.mod_release_selector)
+        self.mod_install_button = QPushButton("Install selected mod", mods_panel)
+        self.mod_install_button.setObjectName("modInstallButton")
+        self.mod_install_button.setEnabled(False)
+        self.mod_install_button.clicked.connect(self._install_selected_modrinth_mod)
+        mods_layout.addWidget(self.mod_install_button)
+        self.mod_search_status = QLabel("", mods_panel)
+        self.mod_search_status.setObjectName("modSearchStatus")
+        self.mod_search_status.setWordWrap(True)
+        mods_layout.addWidget(self.mod_search_status)
         self.mods_list = QListWidget(mods_panel)
         self.mods_list.setObjectName("modsList")
         self.mods_list.currentRowChanged.connect(lambda _row: self._refresh_mod_buttons())
@@ -1485,6 +1513,91 @@ class LauncherWindow(QMainWindow):
         self._refresh_mods_panel()
         self._preserve_lifecycle_status()
 
+    def _search_modrinth_mods(self) -> None:
+        instance = self._selected_instance()
+        query = self.mod_search_input.text().strip()
+        if instance is None:
+            self.mod_search_status.setText("Select an instance before searching for mods.")
+            return
+        if not query:
+            self.mod_search_status.setText("Enter a mod name or search term.")
+            return
+        game_version = instance.get("minecraft_version") or instance.get("version")
+        loader = instance.get("loader")
+        if not isinstance(game_version, str) or not isinstance(loader, str):
+            self.mod_search_status.setText("This instance has no verified game and loader combination.")
+            return
+        try:
+            results = self.modrinth_catalog.search_mods(query, game_version=game_version, loader=loader)
+        except (ModrinthCatalogError, OSError, RuntimeError) as error:
+            self.mod_search_results.clear()
+            self.mod_search_status.setText(f"Mod search failed: {error}")
+            return
+        self.mod_search_results.clear()
+        self.mod_release_selector.clear()
+        self.mod_install_button.setEnabled(False)
+        for result in results:
+            item = QListWidgetItem(str(result.get("title") or result.get("slug") or result.get("project_id")))
+            item.setData(Qt.ItemDataRole.UserRole, result)
+            item.setToolTip(str(result.get("description", "")))
+            self.mod_search_results.addItem(item)
+        self.mod_search_status.setText(
+            f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched."
+        )
+
+    def _select_modrinth_mod(self, current, _previous=None) -> None:
+        self.mod_release_selector.clear()
+        self.mod_install_button.setEnabled(False)
+        if current is None:
+            return
+        instance = self._selected_instance()
+        result = current.data(Qt.ItemDataRole.UserRole) or {}
+        project_id = str(result.get("project_id") or result.get("id") or "")
+        game_version = instance.get("minecraft_version") or instance.get("version") if instance else ""
+        loader = instance.get("loader") if instance else ""
+        if not project_id or not game_version or not loader:
+            return
+        try:
+            releases = self.modrinth_catalog.releases(project_id, game_version=game_version, loader=loader)
+        except (ModrinthCatalogError, OSError, RuntimeError) as error:
+            self.mod_search_status.setText(f"Could not load mod releases: {error}")
+            return
+        for release in releases:
+            if game_version in release.game_versions and loader in release.loaders:
+                self.mod_release_selector.addItem(
+                    f"{release.version_number or release.name} · {release.file_name}", release
+                )
+        self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
+        self.mod_search_status.setText(f"{self.mod_release_selector.count()} compatible release(s) available.")
+
+    def _install_selected_modrinth_mod(self) -> None:
+        instance = self._selected_instance()
+        release = self.mod_release_selector.currentData(Qt.ItemDataRole.UserRole)
+        if self._mutation_blocked(instance) or instance is None or not isinstance(release, ModrinthRelease):
+            return
+        self.mod_install_button.setEnabled(False)
+        try:
+            entries = self.mod_installer.install(
+                instance, self.store.instance_minecraft_root(instance["id"]), release,
+                on_progress=lambda status, _current, _maximum: self.mod_search_status.setText(status),
+            )
+            instance.setdefault("mods", []).extend(entries)
+            instance["modified"] = True
+            self.store.save(self.state)
+            self._refresh_mods_panel()
+            if instance.get("provider"):
+                self.mods_warning_label.setText(
+                    "Added Modrinth mod. This curated pack is now marked modified; compatibility is not guaranteed."
+                )
+            self.mod_search_status.setText(f"Installed {len(entries)} mod and required dependency file(s).")
+        except (ModrinthModInstallError, ModrinthCatalogError, OSError, RuntimeError) as error:
+            self.mod_search_status.setText(f"Mod installation failed: {error}. Retry when the files are available.")
+        finally:
+            self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
+
+    _search_mods = _search_modrinth_mods
+    _install_selected_mod = _install_selected_modrinth_mod
+
     def _refresh_mods_panel(self) -> None:
         instance = self._selected_instance()
         selected_mod_id = self.mods_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.mods_list.currentItem() else None
@@ -1521,6 +1634,11 @@ class LauncherWindow(QMainWindow):
         blocked = self._mutation_blocked(instance, report=False) if instance else True
         has_mod = instance is not None and self.mods_list.currentRow() >= 0
         enabled = instance is not None and not blocked and not self._session_controls_locked
+        self.mod_search_input.setEnabled(enabled)
+        self.mod_search_button.setEnabled(enabled)
+        self.mod_search_results.setEnabled(enabled)
+        self.mod_release_selector.setEnabled(enabled)
+        self.mod_install_button.setEnabled(enabled and self.mod_release_selector.count() > 0)
         self.import_mod_button.setEnabled(enabled)
         self.toggle_mod_button.setEnabled(enabled and has_mod)
         self.remove_mod_button.setEnabled(enabled and has_mod)
@@ -1630,6 +1748,11 @@ class LauncherWindow(QMainWindow):
             self.import_mod_button,
             self.toggle_mod_button,
             self.remove_mod_button,
+            self.mod_search_input,
+            self.mod_search_button,
+            self.mod_search_results,
+            self.mod_release_selector,
+            self.mod_install_button,
         ):
             control.setEnabled(not locked)
         self._refresh_play_button()

@@ -25,6 +25,7 @@ class ModrinthRelease:
     file_name: str
     file_sha1: str
     file_sha512: str
+    dependencies: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_api(cls, value: dict[str, Any], project_id: str = "") -> "ModrinthRelease":
@@ -46,6 +47,7 @@ class ModrinthRelease:
             loaders=tuple(str(item) for item in value.get("loaders", []) if isinstance(item, str)),
             file_url=primary["url"], file_name=str(primary.get("filename", "pack.mrpack")),
             file_sha1=hashes["sha1"], file_sha512=hashes["sha512"],
+            dependencies=tuple(item for item in value.get("dependencies", []) if isinstance(item, dict)),
         )
 
 
@@ -96,6 +98,19 @@ class ModrinthCatalog:
 
     search_modpacks = search
 
+    def search_mods(self, query: str, *, game_version: str = "", loader: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        """Search only Modrinth mods compatible with the requested setup."""
+        facets = [["project_type:mod"]]
+        if game_version:
+            facets.append([f"versions:{game_version}"])
+        if loader:
+            facets.append([f"categories:{loader}"])
+        value = self._get("search", query=query.strip(), facets=json.dumps(facets), limit=str(limit))
+        hits = value.get("hits") if isinstance(value, dict) else None
+        if not isinstance(hits, list):
+            raise ModrinthCatalogError("Modrinth returned an invalid mod search response")
+        return [item for item in hits if isinstance(item, dict) and item.get("project_id")]
+
     def project(self, project_id: str) -> dict[str, Any]:
         value = self._get(f"project/{urllib.parse.quote(project_id, safe='')}")
         if not isinstance(value, dict) or not value.get("id"):
@@ -112,6 +127,14 @@ class ModrinthCatalog:
         return [ModrinthRelease.from_api(item, project_id) for item in value if isinstance(item, dict)]
 
     get_releases = releases
+
+    def release(self, version_id: str) -> ModrinthRelease:
+        value = self._get(f"version/{urllib.parse.quote(version_id, safe='')}")
+        if not isinstance(value, dict):
+            raise ModrinthCatalogError("Modrinth returned an invalid release")
+        return ModrinthRelease.from_api(value, str(value.get("project_id", "")))
+
+    get_release = release
 
     def download_release(self, release: ModrinthRelease) -> bytes:
         return self._download(release.file_url)

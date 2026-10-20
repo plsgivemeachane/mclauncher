@@ -43,3 +43,17 @@ def test_catalog_download_uses_selected_release_url():
     )
     assert catalog.download_release(parsed) == b"archive"
     assert seen == [parsed.file_url]
+
+
+def test_catalog_search_mods_uses_mod_project_type_and_exact_filters():
+    seen = []
+
+    def request(url):
+        seen.append(url)
+        return {"hits": [{"project_id": "mod-1", "title": "Example Mod"}]}
+
+    results = ModrinthCatalog(request=request).search_mods("example", game_version="1.21.4", loader="fabric")
+    assert results[0]["project_id"] == "mod-1"
+    assert "project_type%3Amod" in seen[0]
+    assert "versions%3A1.21.4" in seen[0]
+    assert "categories%3Afabric" in seen[0]
