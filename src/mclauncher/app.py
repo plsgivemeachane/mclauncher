@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -383,6 +384,9 @@ class LauncherWindow(QMainWindow):
         metadata = [entry for entry in metadata if entry["id"] and VERSION_RE.fullmatch(entry["id"])]
         self.state["available_version_metadata"] = metadata
         self.state["available_versions"] = [entry["id"] for entry in metadata]
+        if not self.state.get("selected_setup_id") and not self.state.get("instances") and metadata:
+            stable = next((entry["id"] for entry in metadata if entry.get("type") == "release"), metadata[0]["id"])
+            self.state["selected_setup_id"] = f"version:{stable}"
         if not self.store.recovery_required:
             self.store.save(self.state)
         selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
@@ -468,6 +472,7 @@ class LauncherWindow(QMainWindow):
             self.create_instance_button.setEnabled(False)
             self.install_button.setEnabled(False)
             self.play_button.setEnabled(False)
+            self.settings_button.setEnabled(False)
             self._restoring_state = False
             return
         self.state.setdefault("selected_setup_id", self.state.get("selected_instance_id", ""))
@@ -545,7 +550,9 @@ class LauncherWindow(QMainWindow):
             if not version:
                 continue
             pinned = current == f"version:{version}" or any(
-                instance.get("version") == version for instance in instances
+                instance.get("version") == version
+                and self.state.get("automatic_instances", {}).get(version) == instance.get("id")
+                for instance in instances
             )
             if entry.get("type") != "release" and not self.state.get("show_snapshots", False) and not pinned:
                 continue
@@ -614,6 +621,7 @@ class LauncherWindow(QMainWindow):
         self.store.save(self.state)
         self.state_recovery_label.hide()
         self.recover_state_button.hide()
+        self.settings_button.setEnabled(True)
         self.save_username_button.setEnabled(True)
         self.save_memory_button.setEnabled(True)
         self.create_instance_button.setEnabled(True)
@@ -937,8 +945,8 @@ class LauncherWindow(QMainWindow):
             self.installer,
             instance,
             self.store.instance_minecraft_root(instance["id"]),
-            self._persist_version,
         )
+        self.install_worker.version_resolved.connect(self._persist_version_for_install)
         self.install_worker.progress.connect(self._show_install_progress)
         self.install_worker.succeeded.connect(self._installation_succeeded)
         self.install_worker.failed.connect(self._installation_failed)
@@ -950,6 +958,14 @@ class LauncherWindow(QMainWindow):
         instance["ready"] = False
         instance["install_state"] = "installing"
         self.store.save(self.state)
+
+    def _persist_version_for_install(self, version: str) -> None:
+        instance = self.installing_instance
+        if instance is None or instance.get("id") != self._operation_instance_id:
+            return
+        self._persist_version(instance, version)
+        if self.install_worker is not None:
+            self.install_worker.acknowledge_version()
 
     def _show_install_progress(self, status: str, progress: int, maximum: int) -> None:
         if status:
@@ -1184,18 +1200,30 @@ class InstallWorker(QThread):
     progress = Signal(str, int, int)
     succeeded = Signal()
     failed = Signal(str)
+    version_resolved = Signal(str)
 
-    def __init__(self, installer, instance: dict, minecraft_directory: Path, persist_version) -> None:
+    def __init__(self, installer, instance: dict, minecraft_directory: Path, persist_version=None) -> None:
         super().__init__()
         self.installer = installer
         self.instance = instance
         self.minecraft_directory = minecraft_directory
         self.persist_version = persist_version
+        self._version_ack = threading.Event()
+
+    def acknowledge_version(self) -> None:
+        self._version_ack.set()
 
     def run(self) -> None:
         try:
             if not self.instance.get("version"):
-                self.persist_version(self.instance, self.installer.resolve_version())
+                version = self.installer.resolve_version()
+                if self.persist_version is not None:
+                    self.persist_version(self.instance, version)
+                else:
+                    self.version_resolved.emit(version)
+                    self._version_ack.wait(15)
+                    if not self.instance.get("version"):
+                        raise RuntimeError("Minecraft version resolution was not acknowledged")
             self.installer.install(
                 self.instance,
                 self.minecraft_directory,
