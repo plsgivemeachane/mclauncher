@@ -2,6 +2,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,7 +15,7 @@ from mclauncher.lifecycle import GameProcessRegistry
 
 
 def test_process_identity_rejects_stale_start_time_and_pid_reuse(tmp_path):
-    process = subprocess.Popen(["sleep", "30"])
+    process = _started_sleep_process()
     try:
         identity = GameProcessRegistry.process_identity(process.pid)
         assert identity is not None
@@ -46,7 +47,7 @@ def test_launcher_reopens_running_game_and_clears_record_after_exit(tmp_path):
     (data_root / "state.json").write_text(
         json.dumps({"username": "Alex", "memory_gib": 2, "instances": [instance]}), encoding="utf-8"
     )
-    process = subprocess.Popen(["sleep", "30"])
+    process = _started_sleep_process()
     registry = GameProcessRegistry(data_root)
     try:
         record = registry.remember(process.pid, instance["id"])
@@ -112,3 +113,16 @@ def _ready_window(tmp_path, player):
     window.store.save(window.state)
     window._select_instance(window.instance_list.currentItem(), None)
     return application, window
+
+
+def _started_sleep_process():
+    # Popen can return while Linux is still populating /proc/<pid>/cmdline.
+    # Wait for the child itself to confirm readiness before capturing identity.
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout.readline() == "ready\n"
+    process.stdout.close()
+    return process
