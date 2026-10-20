@@ -1042,21 +1042,10 @@ class LauncherWindow(QMainWindow):
                 self.game_registry.clear()
                 self.game_registry.release()
             return
-        self.game_record = record
-        self.game_process = record
+        self._bind_running_game(record)
         self._operation_selector_value = self.state.get("selected_setup_id") or self.setup_selector.currentData(
             Qt.ItemDataRole.UserRole
         )
-        instance_id = record.get("instance_id")
-        self.game_instance = next(
-            (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
-        )
-        self.last_game_instance = self.game_instance
-        if self.game_instance is not None:
-            self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
-        else:
-            self.instance_status_label.setText("A Minecraft game is already running")
-        self._set_session_controls_locked(True)
         self.game_poll_timer.start()
 
     def _poll_adopted_game(self) -> None:
@@ -1066,18 +1055,7 @@ class LauncherWindow(QMainWindow):
             self._waiting_for_game_lock = False
             record = self.game_registry.adopt()
             if record is not None and self.game_registry.is_alive(record):
-                self.game_record = record
-                self.game_process = record
-                instance_id = record.get("instance_id")
-                self.game_instance = next(
-                    (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
-                )
-                self.last_game_instance = self.game_instance
-                self._set_session_controls_locked(True)
-                if self.game_instance is not None:
-                    self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
-                else:
-                    self.instance_status_label.setText("A Minecraft game is already running")
+                self._bind_running_game(record)
                 return
             self.game_registry.release()
             self._refresh_play_button()
@@ -1095,6 +1073,20 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText(f"Exited: {instance['name']}")
         self._set_session_controls_locked(False)
         self._refresh_play_button()
+
+    def _bind_running_game(self, record: dict) -> None:
+        self.game_record = record
+        self.game_process = record
+        instance_id = record.get("instance_id")
+        self.game_instance = next(
+            (instance for instance in self.state["instances"] if instance.get("id") == instance_id), None
+        )
+        self.last_game_instance = self.game_instance
+        if self.game_instance is not None:
+            self.instance_status_label.setText(f"Running: {self.game_instance['name']}")
+        else:
+            self.instance_status_label.setText("A Minecraft game is already running")
+        self._set_session_controls_locked(True)
 
     def _save_memory(self) -> None:
         if self.store.recovery_required or self._session_controls_locked:

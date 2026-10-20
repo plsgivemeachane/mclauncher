@@ -52,26 +52,26 @@ def test_game_lock_allows_only_one_launcher_claim(tmp_path):
 def test_launcher_waiting_for_game_lock_binds_adopted_record_to_instance(tmp_path):
     application = QApplication.instance() or QApplication([])
     data_root = tmp_path / "launcher-data"
-    instance = {"id": "survival-12345678", "name": "Survival", "version": "1.21.4", "ready": True}
-    data_root.mkdir()
-    (data_root / "state.json").write_text(
-        json.dumps({"username": "Alex", "memory_gib": 2, "instances": [instance]}), encoding="utf-8"
-    )
     holder = GameProcessRegistry(data_root)
     assert holder.acquire()
-    window = LauncherWindow(data_root=data_root)
+    window = _ready_window(tmp_path, MinecraftPlayer())[1]
     process = _started_sleep_process()
     try:
-        window._waiting_for_game_lock = True
-        window.game_poll_timer.start()
+        window.play_button.click()
+        assert window.instance_status_label.text() == "A Minecraft game is already running"
+        assert not window.play_button.isEnabled()
+
+        instance = window.state["instances"][0]
         record = holder.remember(process.pid, instance["id"])
         assert record is not None
         holder.release()
 
-        window._poll_adopted_game()
+        for _ in range(40):
+            application.processEvents()
+            if window.instance_status_label.text() == "Running: Survival":
+                break
+            time.sleep(0.02)
 
-        assert window.game_instance["id"] == instance["id"]
-        assert window.last_game_instance["id"] == instance["id"]
         assert window.instance_status_label.text() == "Running: Survival"
         assert not window.play_button.isEnabled()
     finally:
