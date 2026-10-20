@@ -134,12 +134,14 @@ class LauncherWindow(QMainWindow):
         self.modpack_importer = modpack_importer or ModrinthPackImporter(provider=self.installer)
         self._modpack_importer_injected = modpack_importer is not None
         self.modrinth_updater = modrinth_updater or ModrinthPackUpdater(self.modpack_importer)
+        self._modrinth_updater_injected = modrinth_updater is not None
         self.optifine_installer = optifine_installer or OptiFineInstaller()
         self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
             loader_resolver=getattr(self.installer, "resolve_loader", None)
         )
         self._curseforge_importer_injected = curseforge_importer is not None
         self.curseforge_updater = curseforge_updater or ModrinthPackUpdater(self.curseforge_importer)
+        self._curseforge_updater_injected = curseforge_updater is not None
         self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
         self._catalog_injected = modrinth_catalog is not None
         self._catalog_worker = None
@@ -1517,6 +1519,31 @@ class LauncherWindow(QMainWindow):
 
     def _perform_pack_update(self, instance: dict, archive: Path, *, release_id: str = "") -> None:
         provider = instance.get("provider")
+        updater_injected = self._modrinth_updater_injected if provider == "modrinth" else self._curseforge_updater_injected
+        if not updater_injected:
+            answer = QMessageBox.question(
+                self, "Update pack", "Prepare and replace this pack in the background? Local changes will be backed up.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._set_session_controls_locked(True)
+            instance["install_state"] = "updating"
+            instance["install_error"] = ""
+            instance["ready"] = False
+            self.store.save(self.state)
+            worker = PackUpdateWorker(
+                self._updater_for_provider(provider), archive, self.store.instance_minecraft_root(instance["id"]), instance,
+                release_id,
+            )
+            self._update_worker = worker
+            self._update_worker_instance = instance
+            worker.progress.connect(self._show_import_progress)
+            worker.completed.connect(self._pack_update_completed)
+            worker.failed.connect(self._pack_update_failed)
+            worker.finished.connect(lambda: setattr(self, "_update_worker", None))
+            worker.start()
+            return
         self._set_session_controls_locked(True)
         instance["install_state"] = "updating"
         instance["install_error"] = ""
@@ -1549,6 +1576,30 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText(f"Update failed: {instance['install_error']}")
             self.diagnostic_hint_label.setText("The previous instance is recoverable from its recorded backup; retry or recover.")
         finally:
+            self._set_session_controls_locked(False)
+            self._refresh_play_button()
+
+    def _pack_update_completed(self) -> None:
+        if self._closing:
+            return
+        instance = self._update_worker_instance
+        instance.update(self._update_worker.instance_result)
+        self.store.save(self.state)
+        self.instance_status_label.setText(f"Updated: {instance['name']}")
+        self.diagnostic_hint_label.setText("Update complete; the previous release is backed up.")
+        self._set_session_controls_locked(False)
+        self._refresh_play_button()
+
+    def _pack_update_failed(self, message: str) -> None:
+        instance = self._update_worker_instance
+        instance["ready"] = False
+        instance["install_state"] = "failed"
+        instance["install_error"] = message or "Pack update failed"
+        if not self.store.recovery_required:
+            self.store.save(self.state)
+        if not self._closing:
+            self.instance_status_label.setText(f"Update failed: {instance['install_error']}")
+            self.diagnostic_hint_label.setText("Recover the previous release or retry the update.")
             self._set_session_controls_locked(False)
             self._refresh_play_button()
 
@@ -2301,6 +2352,10 @@ class LauncherWindow(QMainWindow):
             instance and instance.get("install_state") != "incomplete"
             and not self._session_controls_locked and self.install_worker is None and self.game_process is None
         )
+        if instance and instance.get("provider") in {"modrinth", "curseforge"} and instance.get("install_state") in {
+            "failed", "importing", "updating", "interrupted"
+        }:
+            available = False
         self.play_button.setEnabled(available)
         if instance and (instance.get("install_error") or instance.get("install_state") == "interrupted"):
             self.play_button.setText("↻  Retry")
@@ -2469,12 +2524,17 @@ class LauncherWindow(QMainWindow):
             return
         if self._catalog_worker is not None and self._catalog_worker.isRunning():
             self._closing = True
-            self._catalog_worker.requestInterruption()
+            self._catalog_worker.cancel()
             event.accept()
             return
         if getattr(self, "_pack_worker", None) is not None and self._pack_worker.isRunning():
             self._closing = True
-            self._pack_worker.requestInterruption()
+            self._pack_worker.cancel()
+            event.accept()
+            return
+        if getattr(self, "_update_worker", None) is not None and self._update_worker.isRunning():
+            self._closing = True
+            self._update_worker.cancel()
             event.accept()
             return
         if not self.store.recovery_required:
@@ -2484,6 +2544,41 @@ class LauncherWindow(QMainWindow):
             self.game_registry.clear()
         self.game_registry.release()
         super().closeEvent(event)
+
+
+class PackUpdateWorker(QThread):
+    completed = Signal()
+    failed = Signal(str)
+    progress = Signal(str, int, int)
+
+    def __init__(self, updater, archive, directory, instance, release_id) -> None:
+        super().__init__()
+        self.updater = updater
+        self.archive = archive
+        self.directory = directory
+        self.instance = instance.copy()
+        self.release_id = release_id
+        self.instance_result = None
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
+
+    def run(self) -> None:
+        try:
+            self.updater.update(
+                self.instance, self.directory, self.archive, release_id=self.release_id,
+                on_progress=lambda *args: self.progress.emit(*args),
+                confirm_local_changes=lambda _paths: True,
+                cancel_event=self.cancel_event,
+            )
+            self.instance_result = self.instance
+            if not self.isInterruptionRequested():
+                self.completed.emit()
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
 
 
 class PackPreparationWorker(QThread):
@@ -2500,11 +2595,18 @@ class PackPreparationWorker(QThread):
         self.instance = instance.copy()
         self.metadata = None
         self.instance_result = None
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
 
     def run(self) -> None:
         try:
             self.metadata = self.importer.import_archive(
-                self.archive, self.directory, on_progress=lambda *args: self.progress.emit(*args)
+                self.archive, self.directory,
+                on_progress=lambda *args: self.progress.emit(*args),
+                cancel_event=self.cancel_event,
             )
             if not self.metadata.get("complete", True):
                 raise RuntimeError("The selected pack has unavailable required files")
@@ -2542,6 +2644,11 @@ class CatalogOperationWorker(QThread):
         self.updater = updater
         self.release_id = release_id
         self.updating = updater is not None
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
         self.metadata = None
         self.instance_result = None
 
@@ -2555,12 +2662,13 @@ class CatalogOperationWorker(QThread):
                     self.instance, self.directory, self.archive, release_id=self.release_id,
                     on_progress=lambda *args: self.progress.emit(*args),
                     confirm_local_changes=lambda _paths: True,
+                    cancel_event=self.cancel_event,
                 )
                 self.metadata = result["metadata"]
             else:
                 self.metadata = self.importer.import_archive(
                     self.archive, self.directory,
-                    on_progress=lambda *args: self.progress.emit(*args),
+                    on_progress=lambda *args: self.progress.emit(*args), cancel_event=self.cancel_event,
                 )
                 if not self.metadata.get("complete", True):
                     raise RuntimeError("The selected catalog pack has unavailable required files")

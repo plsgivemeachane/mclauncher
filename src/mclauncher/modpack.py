@@ -324,7 +324,8 @@ class ModrinthPackUpdater:
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
             local_files = sorted(
-                path for path in (root / "mods").glob("*")
+                path for directory in (root / "mods", root / "config")
+                if directory.is_dir() for path in directory.rglob("*")
                 if path.is_file() and path.relative_to(root).as_posix() not in old_files
             )
             local_names = [path.relative_to(root).as_posix() for path in local_files]
