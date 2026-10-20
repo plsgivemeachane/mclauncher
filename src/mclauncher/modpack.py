@@ -314,6 +314,12 @@ class ModrinthPackUpdater:
             metadata = self.importer.import_archive(
                 archive_path, stage, cancel_event=cancel_event, on_progress=progress
             )
+            if not metadata.get("complete", True):
+                missing = metadata.get("missing_files", [])
+                raise ModrinthPackUpdateError(
+                    f"The replacement pack is incomplete: {len(missing)} required file(s) are unavailable; "
+                    f"{metadata.get('recovery_action', 'recover provider access and retry')}"
+                )
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
             local_files = sorted(
@@ -345,7 +351,7 @@ class ModrinthPackUpdater:
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
             instance.update(
-                provider="modrinth", pack_source=str(archive_path),
+                provider=metadata.get("provider", instance.get("provider", "modrinth")), pack_source=str(archive_path),
                 game_version=metadata["game_version"], loader=metadata["loader"],
                 loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
                 pack_format=metadata["format"], install_state="ready", ready=True,
