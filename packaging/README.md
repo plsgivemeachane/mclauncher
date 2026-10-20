@@ -19,8 +19,9 @@ From the repository root, run:
 SOURCE_DATE_EPOCH=0 packaging/build-deb.sh
 ```
 
-The output is `dist/mclauncher_0.1.0_amd64.deb`. Existing files in `dist/` are
-preserved; only this package and its metadata files are replaced. Set `SOURCE_DATE_EPOCH` to a
+The output is `dist/mclauncher_<project-version>_amd64.deb` (currently
+`dist/mclauncher_0.1.1_amd64.deb`). Existing files in `dist/` are preserved;
+only this package and its metadata files are replaced. Set `SOURCE_DATE_EPOCH` to a
 release timestamp for stable archive timestamps. Exact byte-for-byte
 reproducibility also requires the pinned build tools, wheel artifacts, compiler,
 and base image to be held constant. The script records exact
@@ -47,6 +48,6 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src ubuntu:24.04 \
     SOURCE_DATE_EPOCH=0 packaging/build-deb.sh'
 ```
 
-Install and inspect the result with `sudo apt install ./dist/mclauncher_0.1.0_amd64.deb`.
+Install and inspect the result with `sudo apt install ./dist/mclauncher_0.1.1_amd64.deb`.
 The build and package checks do not prove a clean physical desktop or a real
 Minecraft launch; those require a graphical Ubuntu host and a Mojang download.
