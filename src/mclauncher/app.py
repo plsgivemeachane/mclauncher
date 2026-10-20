@@ -1005,7 +1005,11 @@ class LauncherWindow(QMainWindow):
                 raise UnsupportedModrinthPack(
                     f"The configured installer cannot prepare {metadata.get('loader', 'this')} packs"
                 )
-            installer_method(instance, self.store.instance_minecraft_root(instance["id"]), metadata, self._show_import_progress)
+            installed_version = installer_method(
+                instance, self.store.instance_minecraft_root(instance["id"]), metadata, self._show_import_progress
+            )
+            if installed_version:
+                instance["installed_version"] = installed_version
             ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
             instance["ready"] = ready
             instance["install_state"] = "ready" if ready else "incomplete"
@@ -1024,7 +1028,7 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
             self.instance_status_label.setText(f"Import failed: {instance['install_error']}")
             self.diagnostic_hint_label.setText(
-                "Choose a supported Modrinth Fabric, Forge, or NeoForge .mrpack and retry the import."
+                "Choose a supported Modrinth Fabric, Quilt, Forge, or NeoForge .mrpack and retry the import."
             )
         finally:
             self._refresh_install_button()
