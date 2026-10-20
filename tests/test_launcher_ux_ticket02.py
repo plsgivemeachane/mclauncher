@@ -7,7 +7,38 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from mclauncher.app import LauncherWindow, local_identity
 
 
-def test_launcher_uses_landscape_launch_bar_layout_with_visible_public_controls(tmp_path):
+class RunningPlayer:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+        self.process = object()
+        self.on_finished = None
+
+    def launch(self, instance, directory, username, player_uuid, on_started, on_finished, memory_gib=None):
+        self.calls.append((instance["id"], username, memory_gib))
+        if self.error:
+            raise RuntimeError(self.error)
+        self.on_finished = on_finished
+        on_started()
+        return self.process
+
+    def finish(self, exit_code=0, crashed=False):
+        self.on_finished(exit_code, crashed)
+
+
+def _ready_window(tmp_path, player):
+    window = LauncherWindow(data_root=tmp_path / "launcher-data", player=player)
+    window.username_input.setText("Alex")
+    window.username_input.editingFinished.emit()
+    window.state["instances"] = [{"id": "survival-1214-a1b2c3d4", "name": "Survival", "version": "1.21.4", "ready": True}]
+    window.store.create_instance_root("survival-1214-a1b2c3d4")
+    window.store.save(window.state)
+    window._add_instance_item(window.state["instances"][0])
+    window.instance_list.setCurrentRow(0)
+    return window
+
+
+def test_launcher_uses_home_artwork_launch_bar_with_visible_public_controls(tmp_path):
     application = QApplication.instance() or QApplication([])
     window = LauncherWindow(data_root=tmp_path / "launcher-data")
     window.show()
@@ -18,7 +49,9 @@ def test_launcher_uses_landscape_launch_bar_layout_with_visible_public_controls(
     assert window.minimumSize().width() <= 680
     assert window.minimumSize().height() <= 420
     assert window.findChild(QLabel, "brandLabel").isVisible()
-    assert window.findChild(QWidget, "landscapePanel").isVisible()
+    assert window.home_artwork.isVisible()
+    assert window.home_nav_button.isVisible()
+    assert window.instances_nav_button.isVisible()
     assert window.findChild(QWidget, "launchBar").isVisible()
     assert window.username_input.isVisible()
     assert window.setup_selector.isVisible()
@@ -85,5 +118,47 @@ def test_username_is_saved_on_editing_completion_and_identity_is_deterministic(t
     window.username_input.setText(" ")
     window.username_input.editingFinished.emit()
     assert window.store.load()["username"] == "Alex"
+    window.close()
+    application.processEvents()
+
+
+def test_play_locks_identity_setup_and_launch_settings_until_game_exit(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    player = RunningPlayer()
+    window = _ready_window(tmp_path, player)
+
+    window.play_button.click()
+
+    assert not window.username_input.isEnabled()
+    assert not window.setup_selector.isEnabled()
+    assert not window.setup_search_input.isEnabled()
+    assert not window.settings_button.isEnabled()
+    assert not window.play_button.isEnabled()
+
+    window.username_input.setText("Changed")
+    window.username_input.editingFinished.emit()
+    assert window.state["username"] == "Alex"
+
+    player.finish()
+    assert window.username_input.isEnabled()
+    assert window.setup_selector.isEnabled()
+    assert window.setup_search_input.isEnabled()
+    assert window.settings_button.isEnabled()
+    assert window.play_button.isEnabled()
+    window.close()
+    application.processEvents()
+
+
+def test_launch_failure_restores_session_controls(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    window = _ready_window(tmp_path, RunningPlayer(error="runtime unavailable"))
+
+    window.play_button.click()
+
+    assert "runtime unavailable" in window.instance_status_label.text()
+    assert window.username_input.isEnabled()
+    assert window.setup_selector.isEnabled()
+    assert window.settings_button.isEnabled()
+    assert window.play_button.isEnabled()
     window.close()
     application.processEvents()

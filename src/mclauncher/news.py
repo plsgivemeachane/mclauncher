@@ -25,7 +25,12 @@ class MinecraftNewsFeed:
         items: list[dict[str, str]] = []
         for item in root.findall(".//item")[:6]:
             title = _text(item.findtext("title"))
-            link = _text(item.findtext("link"))
+            link_element = item.find("link")
+            if link_element is None:
+                link_element = item.find("{http://www.w3.org/2005/Atom}link")
+            link = _text(item.findtext("link")) or _text(
+                link_element.get("href") if link_element is not None else ""
+            )
             if not title or not link or not link.startswith("https://www.minecraft.net/"):
                 continue
             published = _text(item.findtext("pubDate"))
