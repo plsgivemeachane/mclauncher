@@ -51,27 +51,55 @@ Upgrade detection is verified against the installed 0.1.0 package:
 `Inst mclauncher [0.1.0] (0.1.1 local-deb [amd64])` and `1 upgraded`.
 The built executable contains the `0.1.1` runtime version.
 
-## Current integration checkpoint (0.1.2, 2026-10-20)
+## Superseded package checkpoint (0.1.2, 2026-10-20)
 
-The launcher version was advanced to `0.1.2` for the integrated changes. The
-full test suite passed on the current integration source:
+The `0.1.2` package was built before the final Home-screen correction. The
+installed screenshot exposed an empty flat-green landscape, news/changelog
+content on Home, and a background chooser beside the launch controls. The
+artifact was 47,439,448 bytes with SHA-256
+`d494c65d2b6f59e6cb1f9c6e758df5a715acc00da07530d841a58597c2249353`. It is
+superseded by the verified `0.1.3` package below.
+
+## Current integration checkpoint (0.1.3, 2026-10-20)
+
+The final integrated source is commit `c565de5` on
+`integration/launcher-modding`. Version `0.1.3` fixes the packaged-artwork path,
+keeps the Home screen free of background controls, and removes the news feed,
+changelog, and their startup request. Legacy `news_items` fields remain
+readable in saved state.
+
+Full regression suite and whitespace check:
 
 ```text
-TASK_TEST_TMP=$(mktemp -d /tmp/mclauncher-fulltest.XXXXXX)
-uv run --no-project pytest -q --basetemp "$TASK_TEST_TMP"
-156 passed in 8.58s
+TMPDIR=/tmp .venv/bin/python -m pytest -q --basetemp=/tmp/mclauncher-package-013-tests
+157 passed in 7.58s
+git diff --check
+passed
 ```
 
-A fresh `mclauncher_0.1.2_amd64.deb` was built in an Ubuntu 24.04 amd64
-container with a 2-core limit, a 14 GiB memory limit, and Nuitka restricted to
-two jobs. `dpkg-deb` confirmed package `mclauncher`, version `0.1.2`,
-architecture `amd64`, and the launcher, desktop entry, and bundled landscape
-asset. Package size: 47,440,448 bytes. SHA-256:
-`282379448a616753d6d83ce02c347e9f3d308b14d105e29ee57b13e6b49cbda0`.
+`mclauncher_0.1.3_amd64.deb` was built from that source in Ubuntu 24.04 amd64
+with `SOURCE_DATE_EPOCH=0`, a 2-CPU limit, and a 6 GiB container memory cap.
+Package identity:
 
-This checkpoint verifies the build artifact and its archive structure. It does
-not replace the outstanding clean-desktop gameplay and visual acceptance
-journeys below.
+```text
+Package: mclauncher
+Version: 0.1.3
+Architecture: amd64
+Size: 47,336,516 bytes
+SHA-256: 92717bfafe04873179ff8924d8404d3c5e6704f0d22a6c602ad04838a7eac72d
+```
+
+The `.deb` installed successfully and opened through `gtk-launch mclauncher` in
+an Ubuntu 24.04 amd64 Xvfb desktop smoke. The window was 920 × 560, and the
+installed `/usr/lib/mclauncher/assets/minecraft-home.png` was present. The
+captured package screenshot confirms the bundled landscape renders and Home
+contains no news or changelog panel:
+[evidence/07-package-idle-ubuntu24-0.1.3.png](evidence/07-package-idle-ubuntu24-0.1.3.png).
+The background chooser is now in Settings; the Home control was removed.
+
+This smoke verifies package installation, desktop-entry launch, the packaged
+artwork path, and the reference-size idle screen. It does not establish a
+physical desktop graphics journey or real Minecraft gameplay.
 
 ## Gameplay acceptance blocker
 
@@ -83,7 +111,10 @@ relaunch, and world reopen journey could not be reached. TLS verification was
 left enabled. This environment result does not establish a product-side TLS
 defect or successful gameplay.
 
-The real desktop graphics journey, legacy-world verification, secondary
-version/snapshot journey, lifecycle demonstrations, and multi-state visual
-comparison also remain outstanding. Automated tests cover deterministic
-launcher behavior; they do not substitute for those player-visible checks.
+The 0.1.3 desktop smoke still reports release discovery failure because this
+environment presents a self-signed certificate in the TLS chain. TLS
+verification remains enabled. The real game launch and world-save/reopen
+journey, legacy-world verification, secondary version/snapshot journey,
+interruption/retry and lifecycle demonstrations, and visual checks at smaller
+sizes/display scaling remain outstanding. Automated tests and the Xvfb
+screenshot do not substitute for those player-visible checks.

@@ -13,7 +13,7 @@
 - [ ] Demonstrate a second version using its separate automatic instance, version search/downloaded markers, snapshot preference persistence, and remembered concrete selection without silent upgrades.
 - [ ] Demonstrate an interrupted preparation/retry and game close/reopen lifecycle journey. Verify usable progress/errors, one-button recovery, preserved game data, a game surviving launcher closure, and duplicate-launch protection.
 - [ ] Compare actual PySide6 rendering with prototype layout A at the reference size and smaller supported desktop sizes/display scaling. Inspect idle, Settings, selector, empty search, determinate/indeterminate progress, failure, starting, and running states; fix clipping, unreadable contrast, focus, and wrapping problems.
-- [ ] Confirm no prototype switcher/demo state controls, separate Save/Install buttons, main-screen memory/identity administration, or promotional/news panels ship in the product.
+- [x] Confirm no prototype switcher/demo state controls, separate Save/Install buttons, main-screen memory/identity administration, or promotional/news panels ship in the product.
 - [x] Collect packaged screenshots and player-visible evidence. If graphics limitations prevent reaching the menu or saving/reopening worlds, explicitly record those as unresolved acceptance gaps rather than inferring success from JVM startup or mocked tests.
 - [x] Report final validation results and remaining limitations against the specification; preserve the approved prototype reference and keep experimental prototype code separate from production.
 
