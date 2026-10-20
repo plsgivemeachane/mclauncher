@@ -289,6 +289,21 @@ class ModrinthPackUpdater:
             shutil.rmtree(destination)
         shutil.copytree(source, destination)
 
+    @staticmethod
+    def _file_hashes(root: Path, paths) -> dict[str, str]:
+        hashes = {}
+        for relative in paths:
+            if not isinstance(relative, str):
+                continue
+            candidate = _inside(root, _safe_relative_path(relative, label="installed file"))
+            if candidate.is_file():
+                digest = hashlib.sha512()
+                with candidate.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                hashes[relative] = digest.hexdigest()
+        return hashes
+
     def update(
         self,
         instance: dict,
@@ -335,6 +350,13 @@ class ModrinthPackUpdater:
             if isinstance(declared_local, list):
                 local_names.extend(str(path) for path in declared_local if isinstance(path, str))
             local_names = sorted(set(local_names))
+            managed_hashes = instance.get("installed_file_hashes", {})
+            if isinstance(managed_hashes, dict):
+                local_names.extend(
+                    path for path in old_files
+                    if path in managed_hashes and self._file_hashes(root, [path]).get(path) != managed_hashes[path]
+                )
+            local_names = sorted(set(local_names))
             if local_names and confirm_local_changes is not None and not confirm_local_changes(local_names):
                 raise ModrinthPackUpdateError("Update cancelled because local mod changes were not confirmed")
             backup_root.mkdir(parents=True, exist_ok=True)
@@ -365,6 +387,7 @@ class ModrinthPackUpdater:
                 loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
                 pack_format=metadata["format"], install_state="ready", ready=True,
                 install_error="", recovery_backup=str(backup), update_recovery_required=False,
+                installed_file_hashes=self._file_hashes(root, metadata.get("installed_files", [])),
             )
             if release_id:
                 instance["pack_release_id"] = release_id
@@ -389,7 +412,15 @@ class ModrinthPackUpdater:
         backup = Path(str(instance.get("recovery_backup", "")))
         root = Path(minecraft_directory)
         if not backup.is_dir():
-            raise ModrinthPackUpdateError("The recorded Modrinth update backup is unavailable")
+            if (root.parent / "update-journal.json").is_file():
+                raise ModrinthPackUpdateError("The recorded Modrinth update backup is unavailable")
+            # Cancellation can happen while replacement files are staged,
+            # before a backup journal is published. The live tree is intact.
+            instance["install_state"] = "ready"
+            instance["ready"] = True
+            instance["install_error"] = ""
+            instance["update_recovery_required"] = False
+            return
         self._copy_tree(backup, root)
         (root.parent / "update-journal.json").unlink(missing_ok=True)
         instance["install_state"] = "ready"

@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import json
+import threading
 from urllib.request import urlopen
 from pathlib import Path
 from typing import Callable
@@ -79,7 +80,7 @@ class MinecraftInstaller:
         self._validate_installation(version, minecraft_directory)
 
     def install_modpack(self, instance: dict, minecraft_directory: Path, metadata: dict,
-                        on_progress: ProgressCallback) -> str:
+                        on_progress: ProgressCallback, *, cancel_event: threading.Event | None = None) -> str:
         """Install the exact declared loader through launcher-lib's official adapter."""
         loader = metadata.get("loader")
         game = metadata.get("game_version")
@@ -103,15 +104,23 @@ class MinecraftInstaller:
             raise RuntimeError(f"{display} {loader_version} is unavailable for Minecraft {game}")
 
         def callback_status(status: str) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Modpack installation cancelled")
             on_progress(status, -1, -1)
 
         def callback_progress(progress: int) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Modpack installation cancelled")
             on_progress("", progress, -1)
 
         def callback_maximum(maximum: int) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Modpack installation cancelled")
             on_progress("", -1, maximum)
 
         adapter = mod_loader.get_mod_loader(loader_id)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Modpack installation cancelled")
         try:
             installed_version = adapter.install(
                 game,
@@ -125,6 +134,8 @@ class MinecraftInstaller:
         if not isinstance(installed_version, str) or not installed_version:
             display = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt": "Quilt"}[loader_id]
             raise RuntimeError(f"{display} {loader_version} installer did not report an installed version")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Modpack installation cancelled")
         instance["minecraft_version"] = game
         instance["installed_version"] = installed_version
         if loader_id == "forge":

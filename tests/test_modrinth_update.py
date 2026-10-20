@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import hashlib
 
 import pytest
 
@@ -69,6 +70,22 @@ def test_update_declined_local_warning_does_not_publish(tmp_path):
         updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: False)
     assert (root / "mods" / "pack-old.jar").read_bytes() == b"old"
     assert not (root / "mods" / "pack-new.jar").exists()
+
+
+def test_update_warns_when_managed_config_was_modified(tmp_path):
+    root = tmp_path / "minecraft"
+    instance = _instance(root)
+    instance["installed_files"] = ["mods/pack-old.jar", "config/managed.toml"]
+    (root / "config" / "managed.toml").write_text("original", encoding="utf-8")
+    instance["installed_file_hashes"] = {
+        "mods/pack-old.jar": hashlib.sha512(b"old").hexdigest(),
+        "config/managed.toml": hashlib.sha512(b"expected").hexdigest(),
+    }
+    seen = []
+    ModrinthPackUpdater(FakeImporter()).update(
+        instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: seen.extend(paths) or True,
+    )
+    assert "config/managed.toml" in seen
 
 
 def test_failure_restores_live_tree_and_recovery_restores_backup(tmp_path):

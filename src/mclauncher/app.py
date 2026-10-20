@@ -146,6 +146,9 @@ class LauncherWindow(QMainWindow):
         self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
         self._catalog_injected = modrinth_catalog is not None
         self._catalog_worker = None
+        self._catalog_browse_worker = None
+        self._catalog_browse_request = 0
+        self._mod_query_request = 0
         self.mod_installer = mod_installer or ModrinthModInstaller(self.modrinth_catalog)
         self._mod_installer_injected = mod_installer is not None
         self._catalog_results = []
@@ -876,10 +879,15 @@ class LauncherWindow(QMainWindow):
                     instance["install_state"] = "failed"
                     instance["install_error"] = "An interrupted pack update needs recovery from its backup"
                     state_changed = True
-                if instance.get("install_state") == "installing":
+                interrupted_state = instance.get("install_state")
+                if interrupted_state in {"installing", "importing", "updating"}:
                     instance["install_state"] = "interrupted"
                     instance["ready"] = False
-                    instance["install_error"] = "Installation interrupted; retry to continue"
+                    if instance.get("update_recovery_required") or interrupted_state == "updating":
+                        instance["update_recovery_required"] = True
+                        instance["install_error"] = "Pack update interrupted; recover the previous release before playing"
+                    else:
+                        instance["install_error"] = "Installation interrupted; retry to continue"
                     state_changed = True
                 self._add_instance_item(instance)
         self._append_cached_versions()
@@ -1154,6 +1162,18 @@ class LauncherWindow(QMainWindow):
         if not query:
             self.modrinth_catalog_status.setText("Enter a search term to browse Modrinth modpacks.")
             return
+        if not self._catalog_injected:
+            self._catalog_browse_request += 1
+            if self._catalog_browse_worker is not None and self._catalog_browse_worker.isRunning():
+                self._catalog_browse_worker.cancel()
+            worker = CatalogBrowseWorker(self.modrinth_catalog, "search", query)
+            self._catalog_browse_worker = worker
+            request = self._catalog_browse_request
+            worker.completed.connect(lambda results, request=request: self._catalog_search_completed(request, results))
+            worker.failed.connect(lambda message, request=request: self._catalog_search_failed(request, message))
+            worker.finished.connect(lambda worker=worker: self._clear_catalog_browse_worker(worker))
+            worker.start()
+            return
         try:
             results = self.modrinth_catalog.search(query)
         except (ModrinthCatalogError, OSError, RuntimeError) as error:
@@ -1171,6 +1191,26 @@ class LauncherWindow(QMainWindow):
             self.modrinth_pack_list.addItem(item)
         self.modrinth_catalog_status.setText(f"{len(results)} Modrinth pack(s) found." if results else "No Modrinth modpacks matched that search.")
 
+    def _catalog_search_completed(self, request: int, results) -> None:
+        if self._closing or request != self._catalog_browse_request:
+            return
+        self._catalog_results = results
+        self.modrinth_pack_list.clear()
+        for result in results:
+            title = str(result.get("title") or result.get("name") or result.get("slug") or result.get("project_id"))
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, result)
+            item.setToolTip(str(result.get("description", "")))
+            self.modrinth_pack_list.addItem(item)
+        self.modrinth_catalog_status.setText(f"{len(results)} Modrinth pack(s) found." if results else "No Modrinth modpacks matched that search.")
+
+    def _catalog_search_failed(self, request: int, message: str) -> None:
+        if self._closing or request != self._catalog_browse_request:
+            return
+        self._catalog_results = []
+        self.modrinth_pack_list.clear()
+        self.modrinth_catalog_status.setText(f"Modrinth search failed: {message}")
+
     def _select_modrinth_catalog_pack(self, current, _previous=None) -> None:
         self.modrinth_release_selector.clear()
         self._catalog_releases = []
@@ -1180,6 +1220,18 @@ class LauncherWindow(QMainWindow):
         result = current.data(Qt.ItemDataRole.UserRole) or {}
         project_id = str(result.get("project_id") or result.get("id") or "")
         if not project_id:
+            return
+        if not self._catalog_injected:
+            self._catalog_browse_request += 1
+            request = self._catalog_browse_request
+            if self._catalog_browse_worker is not None and self._catalog_browse_worker.isRunning():
+                self._catalog_browse_worker.cancel()
+            worker = CatalogBrowseWorker(self.modrinth_catalog, "details", project_id)
+            self._catalog_browse_worker = worker
+            worker.completed.connect(lambda value, request=request: self._catalog_details_completed(request, value))
+            worker.failed.connect(lambda message, request=request: self._catalog_details_failed(request, message))
+            worker.finished.connect(lambda worker=worker: self._clear_catalog_browse_worker(worker))
+            worker.start()
             return
         try:
             details = self.modrinth_catalog.project(project_id)
@@ -1198,6 +1250,29 @@ class LauncherWindow(QMainWindow):
             )
         self.modrinth_install_button.setEnabled(bool(releases))
         self.modrinth_catalog_status.setText(f"{len(releases)} release(s) available.")
+
+    def _catalog_details_completed(self, request: int, value) -> None:
+        if self._closing or request != self._catalog_browse_request:
+            return
+        details, releases = value
+        self.modrinth_pack_details.setText(f"{details.get('title', '')}\n\n{details.get('description') or 'No description available.'}")
+        self._catalog_releases = releases
+        for release in releases:
+            self.modrinth_release_selector.addItem(
+                f"{release.version_number or release.name} · {', '.join(release.game_versions)}", release,
+            )
+        self.modrinth_install_button.setEnabled(bool(releases))
+        self.modrinth_catalog_status.setText(f"{len(releases)} release(s) available.")
+
+    def _catalog_details_failed(self, request: int, message: str) -> None:
+        if self._closing or request != self._catalog_browse_request:
+            return
+        self.modrinth_pack_details.setText(f"Could not load pack details: {message}")
+        self.modrinth_catalog_status.setText("Choose another pack or retry the search.")
+
+    def _clear_catalog_browse_worker(self, worker) -> None:
+        if self._catalog_browse_worker is worker:
+            self._catalog_browse_worker = None
 
     def _install_modrinth_catalog_release(self) -> None:
         if self._catalog_installing or self._session_controls_locked or self.install_worker is not None:
@@ -1227,6 +1302,11 @@ class LauncherWindow(QMainWindow):
                     return
             instance = existing if updating else self._create_pack_instance(title, archive, provider="modrinth", pack_release_id=release.id, pack_project_id=release.project_id)
             self._catalog_release_context = (release, title, archive, instance)
+            instance["install_state"] = "updating" if updating else "importing"
+            instance["ready"] = False
+            instance["install_error"] = ""
+            self.store.save(self.state)
+            self._set_session_controls_locked(True)
             self.modrinth_install_button.setEnabled(False)
             self._catalog_worker = CatalogOperationWorker(
                 self.modrinth_catalog, release, self.modpack_importer, self.installer,
@@ -1255,6 +1335,7 @@ class LauncherWindow(QMainWindow):
         finally:
             archive.unlink(missing_ok=True)
             self._catalog_installing = False
+            self._set_session_controls_locked(False)
             self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
 
     def _catalog_download_completed(self) -> None:
@@ -1274,6 +1355,7 @@ class LauncherWindow(QMainWindow):
         finally:
             archive.unlink(missing_ok=True)
             self._catalog_installing = False
+            self._set_session_controls_locked(False)
             self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
 
     def _catalog_download_failed(self, message: str) -> None:
@@ -1291,6 +1373,7 @@ class LauncherWindow(QMainWindow):
         if not self._closing:
             self.modrinth_catalog_status.setText(f"Modrinth installation failed: {message}")
         self._catalog_installing = False
+        self._set_session_controls_locked(False)
         self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
 
     def _import_modrinth_pack(self) -> None:
@@ -1400,6 +1483,9 @@ class LauncherWindow(QMainWindow):
             loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
             pack_format=metadata["format"], install_state="ready", ready=True, install_error="",
         )
+        instance["installed_file_hashes"] = ModrinthPackUpdater._file_hashes(
+            self.store.instance_minecraft_root(instance["id"]), metadata.get("installed_files", [])
+        )
         self.store.save(self.state)
         self.instance_status_label.setText(f"Ready: {instance['name']} ({instance['version']})")
         self.diagnostic_hint_label.setText(f"{display_name} pack installed; Play is available.")
@@ -1415,6 +1501,9 @@ class LauncherWindow(QMainWindow):
                 version=metadata["game_version"], minecraft_version=metadata["game_version"], loader=metadata["loader"],
                 loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
                 pack_format=metadata["format"], install_state="imported", ready=False, install_error="",
+            )
+            instance["installed_file_hashes"] = ModrinthPackUpdater._file_hashes(
+                self.store.instance_minecraft_root(instance["id"]), metadata.get("installed_files", [])
             )
             if not metadata.get("complete", True):
                 missing = metadata.get("missing_files", [])
@@ -1525,7 +1614,9 @@ class LauncherWindow(QMainWindow):
     def _optifine_completed(self, result) -> None:
         if self._closing:
             return
-        instance = self._selected_instance()
+        worker = self._optifine_worker
+        instance_id = worker.instance_id if worker is not None else None
+        instance = next((item for item in self.state.get("instances", []) if item.get("id") == instance_id), None)
         if instance is None:
             return
         instance.update(result)
@@ -1675,7 +1766,7 @@ class LauncherWindow(QMainWindow):
         provider = instance.get("provider") if instance else None
         if provider not in {"modrinth", "curseforge"}:
             return
-        if self._mutation_blocked(instance) or self._session_controls_locked:
+        if self._mutation_blocked(instance, allow_recovery=True) or self._session_controls_locked:
             return
         self._set_session_controls_locked(True)
         try:
@@ -1709,7 +1800,8 @@ class LauncherWindow(QMainWindow):
             self.install_progress.setRange(0, maximum)
             self.install_progress.setValue(max(0, current))
 
-    def _mutation_blocked(self, instance: dict | None, *, report: bool = True) -> bool:
+    def _mutation_blocked(self, instance: dict | None, *, report: bool = True,
+                          allow_recovery: bool = False) -> bool:
         if instance is None:
             return True
         instance_id = instance.get("id")
@@ -1727,7 +1819,7 @@ class LauncherWindow(QMainWindow):
                     "This instance is being prepared; wait until preparation finishes."
                 )
             return True
-        if instance.get("update_recovery_required"):
+        if instance.get("update_recovery_required") and not allow_recovery:
             if report:
                 self.diagnostic_hint_label.setText("Recover the interrupted pack update before playing or updating it.")
             return True
@@ -1889,9 +1981,13 @@ class LauncherWindow(QMainWindow):
             self.mod_search_status.setText("This instance has no verified game and loader combination.")
             return
         if not self._catalog_injected:
+            if self._mod_query_worker is not None and self._mod_query_worker.isRunning():
+                self._mod_query_worker.cancel()
+            self._mod_query_request += 1
+            request = self._mod_query_request
             self._mod_query_worker = ModQueryWorker(self.modrinth_catalog, "search", query, game_version, loader)
-            self._mod_query_worker.completed.connect(self._mod_search_completed)
-            self._mod_query_worker.failed.connect(lambda message: self.mod_search_status.setText(f"Mod search failed: {message}"))
+            self._mod_query_worker.completed.connect(lambda results, request=request: self._mod_search_completed(request, results))
+            self._mod_query_worker.failed.connect(lambda message, request=request: self._mod_search_failed(request, message))
             self._mod_query_worker.start()
             return
         try:
@@ -1912,8 +2008,8 @@ class LauncherWindow(QMainWindow):
             f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched."
         )
 
-    def _mod_search_completed(self, results) -> None:
-        if self._closing:
+    def _mod_search_completed(self, request, results) -> None:
+        if self._closing or request != self._mod_query_request:
             return
         self.mod_search_results.clear()
         self.mod_release_selector.clear()
@@ -1924,6 +2020,11 @@ class LauncherWindow(QMainWindow):
             item.setToolTip(str(result.get("description", "")))
             self.mod_search_results.addItem(item)
         self.mod_search_status.setText(f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched.")
+
+    def _mod_search_failed(self, request, message: str) -> None:
+        if self._closing or request != self._mod_query_request:
+            return
+        self.mod_search_status.setText(f"Mod search failed: {message}")
 
     def _select_modrinth_mod(self, current, _previous=None) -> None:
         self.mod_release_selector.clear()
@@ -1938,9 +2039,13 @@ class LauncherWindow(QMainWindow):
         if not project_id or not game_version or not loader:
             return
         if not self._catalog_injected:
+            if self._mod_query_worker is not None and self._mod_query_worker.isRunning():
+                self._mod_query_worker.cancel()
+            self._mod_query_request += 1
+            request = self._mod_query_request
             self._mod_query_worker = ModQueryWorker(self.modrinth_catalog, "releases", project_id, game_version, loader)
-            self._mod_query_worker.completed.connect(self._mod_releases_completed)
-            self._mod_query_worker.failed.connect(lambda message: self.mod_search_status.setText(f"Could not load mod releases: {message}"))
+            self._mod_query_worker.completed.connect(lambda releases, request=request: self._mod_releases_completed(request, releases))
+            self._mod_query_worker.failed.connect(lambda message, request=request: self._mod_releases_failed(request, message))
             self._mod_query_worker.start()
             return
         try:
@@ -1956,8 +2061,8 @@ class LauncherWindow(QMainWindow):
         self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
         self.mod_search_status.setText(f"{self.mod_release_selector.count()} compatible release(s) available.")
 
-    def _mod_releases_completed(self, releases) -> None:
-        if self._closing:
+    def _mod_releases_completed(self, request, releases) -> None:
+        if self._closing or request != self._mod_query_request:
             return
         self.mod_release_selector.clear()
         instance = self._selected_instance()
@@ -1968,6 +2073,11 @@ class LauncherWindow(QMainWindow):
                 self.mod_release_selector.addItem(f"{release.version_number or release.name} · {release.file_name}", release)
         self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
         self.mod_search_status.setText(f"{self.mod_release_selector.count()} compatible release(s) available.")
+
+    def _mod_releases_failed(self, request, message: str) -> None:
+        if self._closing or request != self._mod_query_request:
+            return
+        self.mod_search_status.setText(f"Could not load mod releases: {message}")
 
     def _install_selected_modrinth_mod(self) -> None:
         instance = self._selected_instance()
@@ -2004,7 +2114,9 @@ class LauncherWindow(QMainWindow):
     def _mod_install_completed(self, entries) -> None:
         if self._closing:
             return
-        instance = self._selected_instance()
+        worker = self._mod_worker
+        instance_id = worker.instance_id if worker is not None else None
+        instance = next((item for item in self.state.get("instances", []) if item.get("id") == instance_id), None)
         if instance is None:
             return
         instance.setdefault("mods", []).extend(entries)
@@ -2613,6 +2725,18 @@ class LauncherWindow(QMainWindow):
         self._refresh_play_button()
         self._refresh_instance_mutation_buttons()
 
+    def _persist_interrupted_operation(self, instance: dict | None, *, updating: bool = False) -> None:
+        if not instance or self.store.recovery_required:
+            return
+        instance["ready"] = False
+        instance["install_state"] = "interrupted"
+        if updating:
+            instance["update_recovery_required"] = True
+            instance["install_error"] = "Pack update interrupted; recover the previous release before playing"
+        else:
+            instance["install_error"] = "Pack preparation interrupted; retry to continue"
+        self.store.save(self.state)
+
     def closeEvent(self, event) -> None:
         if self.install_worker is not None and self.installing_instance is not None:
             instance = self.installing_instance
@@ -2640,34 +2764,46 @@ class LauncherWindow(QMainWindow):
             self.instance_status_label.setText("Release discovery is stopping…")
             event.accept()
             return
+        if self._catalog_browse_worker is not None and self._catalog_browse_worker.isRunning():
+            self._closing = True
+            self._catalog_browse_worker.cancel()
+            event.accept()
+            return
         if self._catalog_worker is not None and self._catalog_worker.isRunning():
             self._closing = True
+            context = getattr(self, "_catalog_release_context", None)
+            self._persist_interrupted_operation(context[3] if context else None, updating=self._catalog_worker.updating)
             self._catalog_worker.cancel()
+            self._set_session_controls_locked(False)
             event.accept()
             return
         if getattr(self, "_pack_worker", None) is not None and self._pack_worker.isRunning():
             self._closing = True
+            self._persist_interrupted_operation(getattr(self, "_pack_worker_instance", None))
             self._pack_worker.cancel()
+            self._set_session_controls_locked(False)
             event.accept()
             return
         if getattr(self, "_update_worker", None) is not None and self._update_worker.isRunning():
             self._closing = True
+            self._persist_interrupted_operation(getattr(self, "_update_worker_instance", None), updating=True)
             self._update_worker.cancel()
+            self._set_session_controls_locked(False)
             event.accept()
             return
         if getattr(self, "_mod_query_worker", None) is not None and self._mod_query_worker.isRunning():
             self._closing = True
-            self._mod_query_worker.requestInterruption()
+            self._mod_query_worker.cancel()
             event.accept()
             return
         if getattr(self, "_mod_worker", None) is not None and self._mod_worker.isRunning():
             self._closing = True
-            self._mod_worker.requestInterruption()
+            self._mod_worker.cancel()
             event.accept()
             return
         if getattr(self, "_optifine_worker", None) is not None and self._optifine_worker.isRunning():
             self._closing = True
-            self._optifine_worker.requestInterruption()
+            self._optifine_worker.cancel()
             event.accept()
             return
         if not self.store.recovery_required:
@@ -2687,12 +2823,20 @@ class OptiFineWorker(QThread):
         super().__init__()
         self.installer = installer
         self.instance = instance.copy()
+        self.instance_id = instance.get("id")
         self.directory = directory
         self.jar = jar
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
 
     def run(self) -> None:
         try:
-            result = self.installer.prepare(self.instance, self.directory, self.jar)
+            result = self.installer.prepare(
+                self.instance, self.directory, self.jar, cancel_event=self.cancel_event,
+            )
             if not self.isInterruptionRequested():
                 self.completed.emit(result)
         except Exception as error:
@@ -2711,6 +2855,11 @@ class ModQueryWorker(QThread):
         self.value = value
         self.game_version = game_version
         self.loader = loader
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
 
     def run(self) -> None:
         try:
@@ -2725,6 +2874,34 @@ class ModQueryWorker(QThread):
                 self.failed.emit(str(error))
 
 
+class CatalogBrowseWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, catalog, mode, value) -> None:
+        super().__init__()
+        self.catalog = catalog
+        self.mode = mode
+        self.value = value
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
+
+    def run(self) -> None:
+        try:
+            if self.mode == "search":
+                result = self.catalog.search(self.value)
+            else:
+                result = (self.catalog.project(self.value), self.catalog.releases(self.value))
+            if not self.isInterruptionRequested() and not self.cancel_event.is_set():
+                self.completed.emit(result)
+        except Exception as error:
+            if not self.isInterruptionRequested() and not self.cancel_event.is_set():
+                self.failed.emit(str(error))
+
+
 class ModInstallWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
@@ -2733,13 +2910,20 @@ class ModInstallWorker(QThread):
         super().__init__()
         self.installer = installer
         self.instance = instance.copy()
+        self.instance_id = instance.get("id")
         self.directory = directory
         self.release = release
         self.cancel_event = threading.Event()
 
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
+
     def run(self) -> None:
         try:
-            entries = self.installer.install(self.instance, self.directory, self.release)
+            entries = self.installer.install(
+                self.instance, self.directory, self.release, cancel_event=self.cancel_event,
+            )
             if not self.isInterruptionRequested():
                 self.completed.emit(entries)
         except Exception as error:
@@ -2820,6 +3004,7 @@ class PackPreparationWorker(QThread):
             installed = installer_method(
                 self.instance, self.directory, self.metadata,
                 lambda *args: self.progress.emit(*args),
+                cancel_event=self.cancel_event,
             )
             if installed:
                 self.instance["installed_version"] = installed
@@ -2860,7 +3045,10 @@ class CatalogOperationWorker(QThread):
         if self.isInterruptionRequested():
             return
         try:
-            self.archive.write_bytes(self.catalog.download_release(self.release))
+            downloaded = self.catalog.download_release(self.release)
+            if self.cancel_event.is_set() or self.isInterruptionRequested():
+                return
+            self.archive.write_bytes(downloaded)
             if self.updating:
                 result = self.updater.update(
                     self.instance, self.directory, self.archive, release_id=self.release_id,
@@ -2884,6 +3072,7 @@ class CatalogOperationWorker(QThread):
                 installed = installer_method(
                     self.instance, self.directory, self.metadata,
                     lambda *args: self.progress.emit(*args),
+                    cancel_event=self.cancel_event,
                 )
                 if installed:
                     self.instance["installed_version"] = installed

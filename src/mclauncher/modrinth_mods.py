@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import tempfile
+import threading
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
@@ -67,7 +68,8 @@ class ModrinthModInstaller:
         return resolved
 
     def install(self, instance: dict, instance_root: Path | str, release: ModrinthRelease,
-                *, on_progress: Progress | None = None) -> list[dict]:
+                *, on_progress: Progress | None = None,
+                cancel_event: threading.Event | None = None) -> list[dict]:
         game_version = instance.get("minecraft_version") or instance.get("version")
         loader = instance.get("loader")
         if not isinstance(game_version, str) or not game_version or not isinstance(loader, str) or not loader:
@@ -91,6 +93,8 @@ class ModrinthModInstaller:
         published: list[Path] = []
         try:
             for index, candidate in enumerate(releases, 1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ModrinthModInstallError("Mod installation cancelled")
                 if game_version not in candidate.game_versions or loader not in candidate.loaders:
                     raise ModrinthModInstallError(
                         f"Required dependency {candidate.name} is not compatible with Minecraft {game_version} and {loader}"
@@ -111,6 +115,8 @@ class ModrinthModInstaller:
                 raise ModrinthModInstallError("This instance already contains a mod with the selected filename")
             entries = []
             for candidate, _content, filename in downloaded:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ModrinthModInstallError("Mod installation cancelled")
                 destination = mods_dir / filename
                 shutil.copy2(stage / filename, destination)
                 published.append(destination)
