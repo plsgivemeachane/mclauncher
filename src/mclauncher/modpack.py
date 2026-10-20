@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import urllib.request
 import inspect
 from urllib.parse import urlparse
@@ -270,6 +271,112 @@ class ModrinthPackImporter:
     # Provider-facing name kept alongside the archive-oriented API for callers
     # that model the operation as importing a pack release.
     import_pack = import_archive
+
+
+class ModrinthPackUpdateError(ModrinthPackError):
+    """An update could not be committed or safely recovered."""
+
+
+class ModrinthPackUpdater:
+    """Stage a replacement pack, back up the live instance, then publish atomically."""
+
+    def __init__(self, importer: ModrinthPackImporter):
+        self.importer = importer
+
+    @staticmethod
+    def _copy_tree(source: Path, destination: Path) -> None:
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+
+    def update(
+        self,
+        instance: dict,
+        minecraft_directory: Path | str,
+        archive_path: Path | str,
+        *,
+        release_id: str = "",
+        on_progress: Progress | None = None,
+        confirm_local_changes: Callable[[list[str]], bool] | None = None,
+        cancel_event=None,
+    ) -> dict:
+        if instance.get("install_state") == "installing" or instance.get("active"):
+            raise ModrinthPackUpdateError("This instance is active; finish preparation or exit the game before updating")
+        root = Path(minecraft_directory)
+        if not root.is_dir():
+            raise ModrinthPackUpdateError("The selected Modrinth instance has no usable data directory")
+        progress = on_progress or (lambda *_args: None)
+        stage = Path(tempfile.mkdtemp(prefix=".modrinth-update-", dir=str(root.parent)))
+        backup_root = root.parent / "backups"
+        backup = backup_root / f"{instance.get('id', 'instance')}-{time.time_ns()}"
+        old_files = {str(path) for path in instance.get("installed_files", []) if isinstance(path, str)}
+        try:
+            metadata = self.importer.import_archive(
+                archive_path, stage, cancel_event=cancel_event, on_progress=progress
+            )
+            if cancel_event is not None and cancel_event.is_set():
+                raise ModrinthPackUpdateError("Modrinth pack update cancelled")
+            local_files = sorted(
+                path for path in (root / "mods").glob("*")
+                if path.is_file() and path.relative_to(root).as_posix() not in old_files
+            )
+            local_names = [path.relative_to(root).as_posix() for path in local_files]
+            declared_local = instance.get("local_modifications", [])
+            if isinstance(declared_local, list):
+                local_names.extend(str(path) for path in declared_local if isinstance(path, str))
+            local_names = sorted(set(local_names))
+            if local_names and confirm_local_changes is not None and not confirm_local_changes(local_names):
+                raise ModrinthPackUpdateError("Update cancelled because local mod changes were not confirmed")
+            backup_root.mkdir(parents=True, exist_ok=True)
+            self._copy_tree(root, backup)
+            progress("Backed up current instance", 0, 1)
+            if cancel_event is not None and cancel_event.is_set():
+                raise ModrinthPackUpdateError("Modrinth pack update cancelled")
+            for relative in old_files - set(metadata.get("installed_files", [])):
+                destination = _inside(root, _safe_relative_path(relative, label="installed file"))
+                if destination.is_file():
+                    destination.unlink()
+            for source in sorted(stage.rglob("*")):
+                if source.is_file():
+                    relative = PurePosixPath(source.relative_to(stage).as_posix())
+                    destination = _inside(root, relative)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+            if cancel_event is not None and cancel_event.is_set():
+                raise ModrinthPackUpdateError("Modrinth pack update cancelled")
+            instance.update(
+                provider="modrinth", pack_source=str(archive_path),
+                game_version=metadata["game_version"], loader=metadata["loader"],
+                loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
+                pack_format=metadata["format"], install_state="ready", ready=True,
+                install_error="", recovery_backup=str(backup),
+            )
+            if release_id:
+                instance["pack_release_id"] = release_id
+            return {"metadata": metadata, "backup": str(backup), "local_files": local_names}
+        except Exception as error:
+            if backup.is_dir():
+                try:
+                    self._copy_tree(backup, root)
+                except OSError as recovery_error:
+                    raise ModrinthPackUpdateError(
+                        f"Update failed and recovery failed: {recovery_error}"
+                    ) from error
+            if isinstance(error, ModrinthPackError):
+                raise
+            raise ModrinthPackUpdateError(f"Modrinth pack update failed: {error}") from error
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def recover(self, instance: dict, minecraft_directory: Path | str) -> None:
+        backup = Path(str(instance.get("recovery_backup", "")))
+        root = Path(minecraft_directory)
+        if not backup.is_dir():
+            raise ModrinthPackUpdateError("The recorded Modrinth update backup is unavailable")
+        self._copy_tree(backup, root)
+        instance["install_state"] = "ready"
+        instance["ready"] = True
+        instance["install_error"] = ""
 
 
 class CurseForgeProvider:
