@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import json
+from urllib.request import urlopen
 from pathlib import Path
 from typing import Callable
 
@@ -10,6 +12,7 @@ import minecraft_launcher_lib
 from PySide6.QtCore import QObject, QTimer
 
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
 def validate_version_id(version: str) -> str:
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
@@ -24,15 +27,24 @@ class MinecraftInstaller:
     """Application boundary for vanilla installation and managed Java checks."""
 
     def resolve_version(self) -> str:
-        return validate_version_id(minecraft_launcher_lib.utils.get_latest_version()["release"])
+        manifest = self._fetch_manifest()
+        return validate_version_id(manifest["latest"]["release"])
 
     def discover_versions(self) -> list[dict]:
         """Return concrete release and snapshot choices at the installation boundary."""
         return [
-            {"id": item["id"], "type": item.get("type", "release")}
-            for item in minecraft_launcher_lib.utils.get_version_list()
-            if item.get("type") in {"release", "snapshot"}
+            {"id": validate_version_id(item["id"]), "type": item.get("type", "release")}
+            for item in self._fetch_manifest().get("versions", [])
+            if item.get("type") in {"release", "snapshot"} and VERSION_RE.fullmatch(str(item.get("id", "")))
         ]
+
+    @staticmethod
+    def _fetch_manifest() -> dict:
+        with urlopen(VERSION_MANIFEST_URL, timeout=15) as response:
+            value = json.loads(response.read().decode("utf-8"))
+        if not isinstance(value, dict):
+            raise RuntimeError("Minecraft version manifest was invalid")
+        return value
 
     def install(
         self,

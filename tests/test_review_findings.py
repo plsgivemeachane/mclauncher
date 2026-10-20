@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication
 
 from mclauncher.app import LauncherWindow
 from mclauncher.installer import DetachedMinecraftProcess, MinecraftPlayer
+from mclauncher.installer import MinecraftInstaller
 from mclauncher.persistence import LauncherStore
 
 
@@ -172,5 +173,48 @@ def test_invalid_username_is_rejected_before_persistence(tmp_path):
     window._save_username()
     assert window.state.get("username", "") == ""
     assert "3" in window.username_warning.text()
+    window.close()
+    app.processEvents()
+
+
+def test_invalid_version_is_rejected_before_install_path_use(tmp_path):
+    installer = MinecraftInstaller()
+    with __import__("pytest").raises(ValueError):
+        installer.install({"version": "../escape"}, tmp_path / "minecraft", lambda *_: None)
+    with __import__("pytest").raises(ValueError):
+        MinecraftPlayer().build_command({"version": "../escape"}, tmp_path / "minecraft", "Alex", "uuid")
+
+
+def test_first_discovery_persists_latest_stable_selection(tmp_path):
+    app = QApplication.instance() or QApplication([])
+
+    class Installer:
+        def discover_versions(self):
+            return [{"id": "24w01a", "type": "snapshot"}, {"id": "1.21.4", "type": "release"}]
+
+        def resolve_version(self):
+            return "1.21.4"
+
+    window = LauncherWindow(data_root=tmp_path / "data", installer=Installer())
+    window._versions_discovered([
+        {"id": "24w01a", "type": "snapshot"},
+        {"id": "1.21.4", "type": "release"},
+    ])
+    assert window.state["selected_setup_id"] == "version:1.21.4"
+    assert window.store.load()["selected_setup_id"] == "version:1.21.4"
+    window.close()
+    app.processEvents()
+
+
+def test_named_snapshot_does_not_reveal_version_row_when_opted_out(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    instance = {"id": "snapshot-setup-abcdef12", "name": "Snapshot setup", "version": "24w01a", "ready": False}
+    window.state["instances"] = [instance]
+    window.state["available_version_metadata"] = [{"id": "24w01a", "type": "snapshot"}]
+    window.state["show_snapshots"] = False
+    window._rebuild_setup_selector(selected=instance["id"])
+    assert window.setup_selector.findData(instance["id"]) >= 0
+    assert window.setup_selector.findData("version:24w01a") < 0
     window.close()
     app.processEvents()
