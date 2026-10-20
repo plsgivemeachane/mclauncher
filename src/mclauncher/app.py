@@ -136,6 +136,7 @@ class LauncherWindow(QMainWindow):
         self.modrinth_updater = modrinth_updater or ModrinthPackUpdater(self.modpack_importer)
         self._modrinth_updater_injected = modrinth_updater is not None
         self.optifine_installer = optifine_installer or OptiFineInstaller()
+        self._optifine_injected = optifine_installer is not None
         self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
             loader_resolver=getattr(self.installer, "resolve_loader", None)
         )
@@ -146,6 +147,7 @@ class LauncherWindow(QMainWindow):
         self._catalog_injected = modrinth_catalog is not None
         self._catalog_worker = None
         self.mod_installer = mod_installer or ModrinthModInstaller(self.modrinth_catalog)
+        self._mod_installer_injected = mod_installer is not None
         self._catalog_results = []
         self._catalog_releases = []
         self._catalog_installing = False
@@ -1214,6 +1216,15 @@ class LauncherWindow(QMainWindow):
             self._catalog_installing = True
             existing = self._selected_instance()
             updating = bool(existing and existing.get("provider") == "modrinth" and existing.get("pack_project_id") == release.project_id)
+            if updating:
+                answer = QMessageBox.question(
+                    self, "Update pack", "Replace this instance with the selected release? Local mods and config changes will be backed up.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    self._catalog_installing = False
+                    self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
+                    return
             instance = existing if updating else self._create_pack_instance(title, archive, provider="modrinth", pack_release_id=release.id, pack_project_id=release.project_id)
             self._catalog_release_context = (release, title, archive, instance)
             self.modrinth_install_button.setEnabled(False)
@@ -1266,6 +1277,9 @@ class LauncherWindow(QMainWindow):
             self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
 
     def _catalog_download_failed(self, message: str) -> None:
+        if self._closing:
+            self._catalog_installing = False
+            return
         context = getattr(self, "_catalog_release_context", None)
         if context:
             instance = context[3]
@@ -1341,6 +1355,8 @@ class LauncherWindow(QMainWindow):
         self._refresh_play_button()
 
     def _pack_preparation_failed(self, message: str) -> None:
+        if self._closing:
+            return
         instance = self._pack_worker_instance
         instance["ready"] = False
         instance["install_state"] = "failed"
@@ -1468,6 +1484,12 @@ class LauncherWindow(QMainWindow):
         instance["ready"] = False
         self.store.save(self.state)
         self.instance_status_label.setText(f"Preparing OptiFine for {instance['name']}…")
+        if not self._optifine_injected:
+            self._optifine_worker = OptiFineWorker(self.optifine_installer, instance, self.store.instance_minecraft_root(instance["id"]), Path(filename))
+            self._optifine_worker.completed.connect(self._optifine_completed)
+            self._optifine_worker.failed.connect(self._optifine_failed)
+            self._optifine_worker.start()
+            return
         try:
             result = self.optifine_installer.prepare(
                 instance, self.store.instance_minecraft_root(instance["id"]), Path(filename),
@@ -1500,6 +1522,34 @@ class LauncherWindow(QMainWindow):
             self._refresh_install_button()
             self._refresh_play_button()
 
+    def _optifine_completed(self, result) -> None:
+        if self._closing:
+            return
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        instance.update(result)
+        instance["ready"] = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+        instance["install_state"] = "ready" if instance["ready"] else "incomplete"
+        self.store.save(self.state)
+        self._set_session_controls_locked(False)
+        self._refresh_play_button()
+
+    def _optifine_failed(self, message: str) -> None:
+        if self._closing:
+            return
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        instance["ready"] = False
+        instance["install_state"] = "failed"
+        instance["install_error"] = message
+        self.store.save(self.state)
+        if not self._closing:
+            self.diagnostic_hint_label.setText(message)
+            self._set_session_controls_locked(False)
+            self._refresh_play_button()
+
     def _update_selected_pack(self) -> None:
         """Explicitly replace a Modrinth or CurseForge instance from an archive."""
         instance = self._selected_instance()
@@ -1519,7 +1569,10 @@ class LauncherWindow(QMainWindow):
 
     def _perform_pack_update(self, instance: dict, archive: Path, *, release_id: str = "") -> None:
         provider = instance.get("provider")
+        replacement_directory = None
         updater_injected = self._modrinth_updater_injected if provider == "modrinth" else self._curseforge_updater_injected
+        if provider == "curseforge" and not updater_injected:
+            replacement_directory = self._replacement_directory_for_update()
         if not updater_injected:
             answer = QMessageBox.question(
                 self, "Update pack", "Prepare and replace this pack in the background? Local changes will be backed up.",
@@ -1534,7 +1587,7 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
             worker = PackUpdateWorker(
                 self._updater_for_provider(provider), archive, self.store.instance_minecraft_root(instance["id"]), instance,
-                release_id,
+                release_id, replacement_directory,
             )
             self._update_worker = worker
             self._update_worker_instance = instance
@@ -1560,6 +1613,8 @@ class LauncherWindow(QMainWindow):
                     + "\n\nContinue?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 ) == QMessageBox.StandardButton.Yes,
+                replacements=(self.curseforge_importer.prepare_replacements(archive, replacement_directory)
+                              if provider == "curseforge" and replacement_directory else None),
             )
             instance["ready"] = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
             if not instance["ready"]:
@@ -1579,6 +1634,10 @@ class LauncherWindow(QMainWindow):
             self._set_session_controls_locked(False)
             self._refresh_play_button()
 
+    def _replacement_directory_for_update(self) -> Path | None:
+        selected = QFileDialog.getExistingDirectory(self, "Select verified CurseForge replacement files", "")
+        return Path(selected) if selected else None
+
     def _pack_update_completed(self) -> None:
         if self._closing:
             return
@@ -1591,6 +1650,8 @@ class LauncherWindow(QMainWindow):
         self._refresh_play_button()
 
     def _pack_update_failed(self, message: str) -> None:
+        if self._closing:
+            return
         instance = self._update_worker_instance
         instance["ready"] = False
         instance["install_state"] = "failed"
@@ -1827,6 +1888,12 @@ class LauncherWindow(QMainWindow):
         if not isinstance(game_version, str) or not isinstance(loader, str):
             self.mod_search_status.setText("This instance has no verified game and loader combination.")
             return
+        if not self._catalog_injected:
+            self._mod_query_worker = ModQueryWorker(self.modrinth_catalog, "search", query, game_version, loader)
+            self._mod_query_worker.completed.connect(self._mod_search_completed)
+            self._mod_query_worker.failed.connect(lambda message: self.mod_search_status.setText(f"Mod search failed: {message}"))
+            self._mod_query_worker.start()
+            return
         try:
             results = self.modrinth_catalog.search_mods(query, game_version=game_version, loader=loader)
         except (ModrinthCatalogError, OSError, RuntimeError) as error:
@@ -1845,6 +1912,19 @@ class LauncherWindow(QMainWindow):
             f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched."
         )
 
+    def _mod_search_completed(self, results) -> None:
+        if self._closing:
+            return
+        self.mod_search_results.clear()
+        self.mod_release_selector.clear()
+        self.mod_install_button.setEnabled(False)
+        for result in results:
+            item = QListWidgetItem(str(result.get("title") or result.get("slug") or result.get("project_id")))
+            item.setData(Qt.ItemDataRole.UserRole, result)
+            item.setToolTip(str(result.get("description", "")))
+            self.mod_search_results.addItem(item)
+        self.mod_search_status.setText(f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched.")
+
     def _select_modrinth_mod(self, current, _previous=None) -> None:
         self.mod_release_selector.clear()
         self.mod_install_button.setEnabled(False)
@@ -1856,6 +1936,12 @@ class LauncherWindow(QMainWindow):
         game_version = instance.get("minecraft_version") or instance.get("version") if instance else ""
         loader = instance.get("loader") if instance else ""
         if not project_id or not game_version or not loader:
+            return
+        if not self._catalog_injected:
+            self._mod_query_worker = ModQueryWorker(self.modrinth_catalog, "releases", project_id, game_version, loader)
+            self._mod_query_worker.completed.connect(self._mod_releases_completed)
+            self._mod_query_worker.failed.connect(lambda message: self.mod_search_status.setText(f"Could not load mod releases: {message}"))
+            self._mod_query_worker.start()
             return
         try:
             releases = self.modrinth_catalog.releases(project_id, game_version=game_version, loader=loader)
@@ -1870,12 +1956,32 @@ class LauncherWindow(QMainWindow):
         self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
         self.mod_search_status.setText(f"{self.mod_release_selector.count()} compatible release(s) available.")
 
+    def _mod_releases_completed(self, releases) -> None:
+        if self._closing:
+            return
+        self.mod_release_selector.clear()
+        instance = self._selected_instance()
+        game_version = instance.get("minecraft_version") or instance.get("version") if instance else ""
+        loader = instance.get("loader") if instance else ""
+        for release in releases:
+            if game_version in release.game_versions and loader in release.loaders:
+                self.mod_release_selector.addItem(f"{release.version_number or release.name} · {release.file_name}", release)
+        self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
+        self.mod_search_status.setText(f"{self.mod_release_selector.count()} compatible release(s) available.")
+
     def _install_selected_modrinth_mod(self) -> None:
         instance = self._selected_instance()
         release = self.mod_release_selector.currentData(Qt.ItemDataRole.UserRole)
         if self._mutation_blocked(instance) or instance is None or not isinstance(release, ModrinthRelease):
             return
         self.mod_install_button.setEnabled(False)
+        if not self._mod_installer_injected:
+            self._mod_worker = ModInstallWorker(self.mod_installer, instance, self.store.instance_minecraft_root(instance["id"]), release)
+            self._mod_worker.completed.connect(self._mod_install_completed)
+            self._mod_worker.failed.connect(lambda message: self.mod_search_status.setText(f"Mod installation failed: {message}. Retry when the files are available."))
+            self._mod_worker.finished.connect(lambda: self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0))
+            self._mod_worker.start()
+            return
         try:
             entries = self.mod_installer.install(
                 instance, self.store.instance_minecraft_root(instance["id"]), release,
@@ -1894,6 +2000,18 @@ class LauncherWindow(QMainWindow):
             self.mod_search_status.setText(f"Mod installation failed: {error}. Retry when the files are available.")
         finally:
             self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0)
+
+    def _mod_install_completed(self, entries) -> None:
+        if self._closing:
+            return
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        instance.setdefault("mods", []).extend(entries)
+        instance["modified"] = True
+        self.store.save(self.state)
+        self._refresh_mods_panel()
+        self.mod_search_status.setText(f"Installed {len(entries)} mod and required dependency file(s).")
 
     _search_mods = _search_modrinth_mods
     _install_selected_mod = _install_selected_modrinth_mod
@@ -2537,6 +2655,21 @@ class LauncherWindow(QMainWindow):
             self._update_worker.cancel()
             event.accept()
             return
+        if getattr(self, "_mod_query_worker", None) is not None and self._mod_query_worker.isRunning():
+            self._closing = True
+            self._mod_query_worker.requestInterruption()
+            event.accept()
+            return
+        if getattr(self, "_mod_worker", None) is not None and self._mod_worker.isRunning():
+            self._closing = True
+            self._mod_worker.requestInterruption()
+            event.accept()
+            return
+        if getattr(self, "_optifine_worker", None) is not None and self._optifine_worker.isRunning():
+            self._closing = True
+            self._optifine_worker.requestInterruption()
+            event.accept()
+            return
         if not self.store.recovery_required:
             self.store.save(self.state)
         self.game_poll_timer.stop()
@@ -2546,18 +2679,87 @@ class LauncherWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class OptiFineWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, installer, instance, directory, jar) -> None:
+        super().__init__()
+        self.installer = installer
+        self.instance = instance.copy()
+        self.directory = directory
+        self.jar = jar
+
+    def run(self) -> None:
+        try:
+            result = self.installer.prepare(self.instance, self.directory, self.jar)
+            if not self.isInterruptionRequested():
+                self.completed.emit(result)
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
+
+
+class ModQueryWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, catalog, mode, value, game_version, loader) -> None:
+        super().__init__()
+        self.catalog = catalog
+        self.mode = mode
+        self.value = value
+        self.game_version = game_version
+        self.loader = loader
+
+    def run(self) -> None:
+        try:
+            if self.mode == "search":
+                result = self.catalog.search_mods(self.value, game_version=self.game_version, loader=self.loader)
+            else:
+                result = self.catalog.releases(self.value, game_version=self.game_version, loader=self.loader)
+            if not self.isInterruptionRequested():
+                self.completed.emit(result)
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
+
+
+class ModInstallWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, installer, instance, directory, release) -> None:
+        super().__init__()
+        self.installer = installer
+        self.instance = instance.copy()
+        self.directory = directory
+        self.release = release
+        self.cancel_event = threading.Event()
+
+    def run(self) -> None:
+        try:
+            entries = self.installer.install(self.instance, self.directory, self.release)
+            if not self.isInterruptionRequested():
+                self.completed.emit(entries)
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
+
+
 class PackUpdateWorker(QThread):
     completed = Signal()
     failed = Signal(str)
     progress = Signal(str, int, int)
 
-    def __init__(self, updater, archive, directory, instance, release_id) -> None:
+    def __init__(self, updater, archive, directory, instance, release_id, replacement_directory=None) -> None:
         super().__init__()
         self.updater = updater
         self.archive = archive
         self.directory = directory
         self.instance = instance.copy()
         self.release_id = release_id
+        self.replacement_directory = replacement_directory
         self.instance_result = None
         self.cancel_event = threading.Event()
 
@@ -2572,6 +2774,8 @@ class PackUpdateWorker(QThread):
                 on_progress=lambda *args: self.progress.emit(*args),
                 confirm_local_changes=lambda _paths: True,
                 cancel_event=self.cancel_event,
+                replacements=(self.updater.importer.prepare_replacements(self.archive, self.replacement_directory)
+                              if self.replacement_directory and hasattr(self.updater.importer, "prepare_replacements") else None),
             )
             self.instance_result = self.instance
             if not self.isInterruptionRequested():

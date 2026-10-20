@@ -33,6 +33,8 @@ def _instance(root: Path) -> dict:
     (root / "mods").mkdir(parents=True)
     (root / "mods" / "pack-old.jar").write_bytes(b"old")
     (root / "mods" / "local.jar").write_bytes(b"local")
+    (root / "config").mkdir()
+    (root / "config" / "local.toml").write_text("local", encoding="utf-8")
     (root / "saves").mkdir()
     (root / "saves" / "world.txt").write_text("world", encoding="utf-8")
     return {
@@ -55,7 +57,7 @@ def test_update_backs_up_worlds_warns_local_mods_and_publishes_after_stage(tmp_p
     assert (root / "mods" / "local.jar").read_bytes() == b"local"
     assert instance["pack_release_id"] == "new"
     assert instance["install_state"] == "ready"
-    assert result["local_files"] == ["mods/local.jar"]
+    assert result["local_files"] == ["config/local.toml", "mods/local.jar"]
 
 
 def test_update_declined_local_warning_does_not_publish(tmp_path):

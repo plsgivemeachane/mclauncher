@@ -299,6 +299,7 @@ class ModrinthPackUpdater:
         on_progress: Progress | None = None,
         confirm_local_changes: Callable[[list[str]], bool] | None = None,
         cancel_event=None,
+        replacements=None,
     ) -> dict:
         if instance.get("install_state") == "installing" or instance.get("active"):
             raise ModrinthPackUpdateError("This instance is active; finish preparation or exit the game before updating")
@@ -312,9 +313,10 @@ class ModrinthPackUpdater:
         journal = root.parent / "update-journal.json"
         old_files = {str(path) for path in instance.get("installed_files", []) if isinstance(path, str)}
         try:
-            metadata = self.importer.import_archive(
-                archive_path, stage, cancel_event=cancel_event, on_progress=progress
-            )
+            import_kwargs = {"cancel_event": cancel_event, "on_progress": progress}
+            if replacements is not None:
+                import_kwargs["replacements"] = replacements
+            metadata = self.importer.import_archive(archive_path, stage, **import_kwargs)
             if not metadata.get("complete", True):
                 missing = metadata.get("missing_files", [])
                 raise ModrinthPackUpdateError(
@@ -571,6 +573,23 @@ class CurseForgePackImporter:
         if not self._verify(content, metadata):
             raise CurseForgePackError("Replacement file failed authoritative integrity verification")
         return True
+
+    def prepare_replacements(self, archive_path: Path | str, directory: Path | str) -> dict[tuple[int, int], Path]:
+        """Map user-selected files to manifest references after authoritative lookup."""
+        root = Path(directory)
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                manifest = self._manifest(archive)
+        except (OSError, zipfile.BadZipFile) as error:
+            raise CurseForgePackError(f"The selected CurseForge archive is invalid: {error}") from error
+        replacements = {}
+        for entry in manifest["files"]:
+            key = (entry.get("projectID"), entry.get("fileID"))
+            metadata = self._resolve(*key)
+            filename = metadata.get("fileName") or metadata.get("filename")
+            if isinstance(filename, str) and (root / filename).is_file():
+                replacements[key] = root / filename
+        return replacements
 
     def import_archive(self, archive_path: Path | str, instance_root: Path | str, *, cancel_event=None,
                        on_progress: Progress | None = None, replacements: Mapping[object, Path | str] | None = None) -> dict:
