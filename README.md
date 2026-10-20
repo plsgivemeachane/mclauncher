@@ -12,7 +12,7 @@ Download the `.deb` from [Releases](https://github.com/plsgivemeachane/mclaunche
 sudo apt install ./mclauncher_0.1.2_amd64.deb
 ```
 
-Minecraft and Java are downloaded when you choose **Install Minecraft**. They are not bundled in the launcher package.
+Minecraft and Java are downloaded when you press **Play** for a version that needs preparation. They are not bundled in the launcher package.
 
 ## Develop
 
