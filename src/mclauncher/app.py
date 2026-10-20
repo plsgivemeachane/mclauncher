@@ -132,11 +132,13 @@ class LauncherWindow(QMainWindow):
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
         self.modpack_importer = modpack_importer or ModrinthPackImporter(provider=self.installer)
+        self._modpack_importer_injected = modpack_importer is not None
         self.modrinth_updater = modrinth_updater or ModrinthPackUpdater(self.modpack_importer)
         self.optifine_installer = optifine_installer or OptiFineInstaller()
         self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
             loader_resolver=getattr(self.installer, "resolve_loader", None)
         )
+        self._curseforge_importer_injected = curseforge_importer is not None
         self.curseforge_updater = curseforge_updater or ModrinthPackUpdater(self.curseforge_importer)
         self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
         self._catalog_injected = modrinth_catalog is not None
@@ -1307,7 +1309,48 @@ class LauncherWindow(QMainWindow):
                                   display_name: str = "Modrinth") -> None:
         importer = importer or self.modpack_importer
         instance = self._create_pack_instance(name, archive, provider=provider, pack_release_id=pack_release_id, pack_project_id=pack_project_id)
+        if (provider == "modrinth" and not self._modpack_importer_injected) or (provider == "curseforge" and not self._curseforge_importer_injected):
+            self._start_pack_preparation_worker(instance, archive, importer, display_name)
+            return
         self._install_pack_archive_sync(instance, archive, importer, display_name)
+
+    def _start_pack_preparation_worker(self, instance: dict, archive: Path, importer, display_name: str) -> None:
+        self._set_session_controls_locked(True)
+        worker = PackPreparationWorker(
+            importer, self.installer, archive, self.store.instance_minecraft_root(instance["id"]), instance,
+        )
+        self._pack_worker = worker
+        self._pack_worker_instance = instance
+        self._pack_worker_display_name = display_name
+        worker.progress.connect(self._show_import_progress)
+        worker.completed.connect(self._pack_preparation_completed)
+        worker.failed.connect(self._pack_preparation_failed)
+        worker.finished.connect(lambda: setattr(self, "_pack_worker", None))
+        worker.start()
+
+    def _pack_preparation_completed(self) -> None:
+        if self._closing:
+            return
+        worker = self._pack_worker
+        instance = self._pack_worker_instance
+        self._finish_pack_install(instance, worker.metadata, worker.instance_result, self._pack_worker_display_name)
+        self._set_session_controls_locked(False)
+        self._refresh_install_button()
+        self._refresh_play_button()
+
+    def _pack_preparation_failed(self, message: str) -> None:
+        instance = self._pack_worker_instance
+        instance["ready"] = False
+        instance["install_state"] = "failed"
+        instance["install_error"] = message or f"{self._pack_worker_display_name} pack import failed"
+        if not self.store.recovery_required:
+            self.store.save(self.state)
+        if not self._closing:
+            self.instance_status_label.setText(f"Import failed: {instance['install_error']}")
+            self.diagnostic_hint_label.setText("Retry the import after correcting the source or provider access.")
+            self._set_session_controls_locked(False)
+            self._refresh_install_button()
+            self._refresh_play_button()
 
     def _create_pack_instance(self, name: str, archive: Path, *, provider: str, pack_release_id: str = "", pack_project_id: str = "") -> dict:
         existing_names = {str(item.get("name")) for item in self.state.get("instances", [])}
@@ -2429,6 +2472,11 @@ class LauncherWindow(QMainWindow):
             self._catalog_worker.requestInterruption()
             event.accept()
             return
+        if getattr(self, "_pack_worker", None) is not None and self._pack_worker.isRunning():
+            self._closing = True
+            self._pack_worker.requestInterruption()
+            event.accept()
+            return
         if not self.store.recovery_required:
             self.store.save(self.state)
         self.game_poll_timer.stop()
@@ -2436,6 +2484,45 @@ class LauncherWindow(QMainWindow):
             self.game_registry.clear()
         self.game_registry.release()
         super().closeEvent(event)
+
+
+class PackPreparationWorker(QThread):
+    completed = Signal()
+    failed = Signal(str)
+    progress = Signal(str, int, int)
+
+    def __init__(self, importer, installer, archive, directory, instance) -> None:
+        super().__init__()
+        self.importer = importer
+        self.installer = installer
+        self.archive = archive
+        self.directory = directory
+        self.instance = instance.copy()
+        self.metadata = None
+        self.instance_result = None
+
+    def run(self) -> None:
+        try:
+            self.metadata = self.importer.import_archive(
+                self.archive, self.directory, on_progress=lambda *args: self.progress.emit(*args)
+            )
+            if not self.metadata.get("complete", True):
+                raise RuntimeError("The selected pack has unavailable required files")
+            installer_method = getattr(self.installer, "install_modpack", None)
+            if not callable(installer_method):
+                raise RuntimeError("The configured installer cannot prepare this modpack")
+            installed = installer_method(
+                self.instance, self.directory, self.metadata,
+                lambda *args: self.progress.emit(*args),
+            )
+            if installed:
+                self.instance["installed_version"] = installed
+            self.instance_result = self.instance
+            if not self.isInterruptionRequested():
+                self.completed.emit()
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
 
 
 class CatalogOperationWorker(QThread):
