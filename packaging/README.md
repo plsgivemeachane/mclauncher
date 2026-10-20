@@ -8,8 +8,9 @@ and wraps the result in a `.deb`.
 
 The package contains the launcher and its Python/Qt dependencies. Minecraft
 versions, assets, and managed Java runtimes are downloaded only when the user
-selects **Install Minecraft**; they are deliberately not included in this
-package. Updating the launcher remains a manual package installation step.
+presses **Play** for a version that needs preparation; they are deliberately
+not included in this package. Updating the launcher remains a manual package
+installation step.
 
 ## Build
 
