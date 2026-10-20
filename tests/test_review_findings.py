@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -135,21 +136,37 @@ def test_ready_flag_alone_keeps_recovery_available_through_play(tmp_path):
     app.processEvents()
 
 
-def test_close_during_install_is_ignored(tmp_path):
+def test_close_during_install_cancels_and_persists_interrupted_state(tmp_path):
     app = QApplication.instance() or QApplication([])
-    window = LauncherWindow(data_root=tmp_path / "data")
-    window.install_worker = object()
-    window.installing_instance = {"id": "x", "name": "x"}
-    class Event:
-        def __init__(self): self.ignored = False
-        def ignore(self): self.ignored = True
-    event = Event()
-    window.closeEvent(event)
-    assert event.ignored
-    window.install_worker = None
-    window.installing_instance = None
+    started = threading.Event()
+    release = threading.Event()
+
+    class HeldInstaller:
+        def resolve_version(self):
+            return "1.21.4"
+
+        def install(self, instance, minecraft_directory, on_progress):
+            started.set()
+            release.wait(5)
+
+    root = tmp_path / "data"
+    window = LauncherWindow(data_root=root, installer=HeldInstaller())
+    window.username_input.setText("Alex")
+    window.save_username_button.click()
+    window.instance_name_input.setText("Survival")
+    window.create_instance_button.click()
+    window.state["instances"][0]["version"] = "1.21.4"
+    window.store.save(window.state)
+    window.install_button.click()
+    assert started.wait(2)
+
     window.close()
     app.processEvents()
+    persisted = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    assert persisted["instances"][0]["ready"] is False
+    assert persisted["instances"][0]["install_state"] == "interrupted"
+    assert "retry" in persisted["instances"][0]["install_error"].lower()
+    release.set()
 
 
 def test_settings_memory_update_syncs_main_launch_field(tmp_path):

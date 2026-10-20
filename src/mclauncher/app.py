@@ -39,6 +39,7 @@ from .lifecycle import GameProcessRegistry
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
+_ACTIVE_INSTALL_WORKERS: set[QThread] = set()
 
 
 def _release_discovery_worker(worker: QThread) -> None:
@@ -110,6 +111,7 @@ class LauncherWindow(QMainWindow):
         self.game_poll_timer.setInterval(500)
         self.game_poll_timer.timeout.connect(self._poll_adopted_game)
         self._waiting_for_game_lock = False
+        self._closing = False
         self.state = self.store.load()
         self._build_ui()
         self._restore_state()
@@ -956,7 +958,7 @@ class LauncherWindow(QMainWindow):
         return instance
 
     def _install_selected_instance(self) -> None:
-        if self.install_worker is not None:
+        if self.install_worker is not None or self._closing:
             return
         instance = self._selected_instance()
         if instance is None:
@@ -981,11 +983,15 @@ class LauncherWindow(QMainWindow):
             instance,
             self.store.instance_minecraft_root(instance["id"]),
         )
+        _ACTIVE_INSTALL_WORKERS.add(self.install_worker)
         self.install_worker.version_resolved.connect(self._persist_version_for_install)
         self.install_worker.progress.connect(self._show_install_progress)
         self.install_worker.succeeded.connect(self._installation_succeeded)
         self.install_worker.failed.connect(self._installation_failed)
         self.install_worker.finished.connect(self._installation_finished)
+        self.install_worker.finished.connect(
+            lambda worker=self.install_worker: _release_install_worker(worker)
+        )
         self.install_worker.start()
 
     def _persist_version(self, instance: dict, version: str) -> None:
@@ -995,6 +1001,8 @@ class LauncherWindow(QMainWindow):
         self.store.save(self.state)
 
     def _persist_version_for_install(self, version: str) -> None:
+        if self._closing:
+            return
         instance = self.installing_instance
         if instance is None or instance.get("id") != self._operation_instance_id:
             return
@@ -1003,6 +1011,8 @@ class LauncherWindow(QMainWindow):
             self.install_worker.acknowledge_version()
 
     def _show_install_progress(self, status: str, progress: int, maximum: int) -> None:
+        if self._closing:
+            return
         if status:
             self.instance_status_label.setText(status)
         if maximum < 0 or progress < 0:
@@ -1014,6 +1024,8 @@ class LauncherWindow(QMainWindow):
             self.install_progress.setValue(progress)
 
     def _installation_succeeded(self) -> None:
+        if self._closing:
+            return
         instance = self.installing_instance
         if instance is None or instance.get("id") != self._operation_instance_id:
             return
@@ -1050,6 +1062,8 @@ class LauncherWindow(QMainWindow):
                 self._launch_ready_instance(instance, username, memory_gib)
 
     def _installation_failed(self, message: str) -> None:
+        if self._closing:
+            return
         instance = self.installing_instance
         if instance is None or instance.get("id") != self._operation_instance_id:
             return
@@ -1069,6 +1083,8 @@ class LauncherWindow(QMainWindow):
             self.game_registry.release()
 
     def _installation_finished(self) -> None:
+        if self._closing:
+            return
         worker = self.install_worker
         self.install_worker = None
         if worker is not None:
@@ -1244,8 +1260,25 @@ class LauncherWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.install_worker is not None and self.installing_instance is not None:
-            self.instance_status_label.setText("Installation is still running; wait for it to finish before closing.")
-            event.ignore()
+            instance = self.installing_instance
+            resolved_version = getattr(self.install_worker, "resolved_version", None)
+            if not instance.get("version") and resolved_version:
+                instance["version"] = resolved_version
+            instance["ready"] = False
+            instance["install_state"] = "interrupted"
+            instance["install_error"] = "Installation interrupted; retry to continue"
+            if not self.store.recovery_required:
+                self.store.save(self.state)
+            self._closing = True
+            self._launch_after_prepare = False
+            self._operation_instance_id = None
+            self.install_worker.cancel()
+            self.game_registry.release()
+            event.accept()
+            self.game_poll_timer.stop()
+            if self.game_process is None:
+                self.game_registry.clear()
+            super().closeEvent(event)
             return
         if self.discovery_worker is not None and self.discovery_worker.isRunning():
             self.discovery_worker.requestInterruption()
@@ -1273,27 +1306,55 @@ class InstallWorker(QThread):
         self.instance = instance
         self.minecraft_directory = minecraft_directory
         self._version_ack = threading.Event()
+        self._cancelled = threading.Event()
+        self.resolved_version: str | None = None
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        self.requestInterruption()
 
     def acknowledge_version(self) -> None:
         self._version_ack.set()
 
     def run(self) -> None:
         try:
+            self._raise_if_cancelled()
             if not self.instance.get("version"):
                 version = self.installer.resolve_version()
+                self._raise_if_cancelled()
+                self.resolved_version = version
                 self.version_resolved.emit(version)
                 self._version_ack.wait(15)
+                self._raise_if_cancelled()
                 if not self.instance.get("version"):
                     raise RuntimeError("Minecraft version resolution was not acknowledged")
             self.installer.install(
                 self.instance,
                 self.minecraft_directory,
-                self.progress.emit,
+                self._emit_progress,
             )
+            self._raise_if_cancelled()
         except Exception as error:
-            self.failed.emit(str(error) or "unknown installation error")
+            if not isinstance(error, InstallationCancelled):
+                self.failed.emit(str(error) or "unknown installation error")
         else:
             self.succeeded.emit()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancelled.is_set() or self.isInterruptionRequested():
+            raise InstallationCancelled()
+
+    def _emit_progress(self, status: str, progress: int, maximum: int) -> None:
+        self._raise_if_cancelled()
+        self.progress.emit(status, progress, maximum)
+
+
+class InstallationCancelled(Exception):
+    """Internal worker signal used to suppress results after launcher close."""
+
+
+def _release_install_worker(worker: QThread) -> None:
+    _ACTIVE_INSTALL_WORKERS.discard(worker)
 
 
 class VersionDiscoveryWorker(QThread):
