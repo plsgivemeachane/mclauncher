@@ -307,6 +307,14 @@ def test_update_refuses_instance_with_unresolved_journal(tmp_path, monkeypatch):
     window.close()
 
 
+def test_updater_refuses_direct_update_with_unresolved_journal(tmp_path):
+    root = tmp_path / "minecraft"
+    instance = _instance(root)
+    (root.parent / "update-journal.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ModrinthPackUpdateError, match="recovered"):
+        ModrinthPackUpdater(FakeImporter()).update(instance, root, tmp_path / "replacement.mrpack")
+
+
 def test_update_journal_unlink_failure_marks_recovery_required(tmp_path, monkeypatch):
     archive = tmp_path / "replacement.mrpack"
     archive.write_bytes(b"fixture")
@@ -314,6 +322,9 @@ def test_update_journal_unlink_failure_marks_recovery_required(tmp_path, monkeyp
     class Updater:
         def update(self, instance, root, selected, **kwargs):
             instance.update(install_state="ready", ready=True, recovery_backup=str(tmp_path / "backup"))
+            (root.parent / "update-journal.json").write_text(
+                '{"backup": "' + str(tmp_path / "backup") + '"}\n', encoding="utf-8"
+            )
             return {"backup": str(tmp_path / "backup")}
 
     class Player:

@@ -879,6 +879,11 @@ class LauncherWindow(QMainWindow):
                     instance["install_state"] = "failed"
                     instance["install_error"] = "An interrupted pack update needs recovery from its backup"
                     state_changed = True
+                elif instance.get("update_recovery_required"):
+                    # The cleanup entry may have been removed before its
+                    # directory fsync failed; there is no journal to recover.
+                    instance["update_recovery_required"] = False
+                    state_changed = True
                 interrupted_state = instance.get("install_state")
                 if interrupted_state in {"installing", "importing", "updating"}:
                     instance["install_state"] = "interrupted"
@@ -1354,7 +1359,11 @@ class LauncherWindow(QMainWindow):
             if self._catalog_worker.updating:
                 instance.update(self._catalog_worker.instance_result)
                 self.store.save(self.state)
-                ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+                try:
+                    ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+                except (OSError, RuntimeError):
+                    self._mark_update_recovery_required(instance, "Pack update journal cleanup was not durable", force_recovery=True)
+                    raise
                 self.modrinth_catalog_status.setText(f"Updated {title} {release.version_number or release.name}.")
             else:
                 self._finish_pack_install(instance, self._catalog_worker.metadata, self._catalog_worker.instance_result, title)
@@ -1730,7 +1739,11 @@ class LauncherWindow(QMainWindow):
                 raise ModrinthPackUpdateError("Updated files are incomplete; recover from the recorded backup")
             instance["install_state"] = "ready"
             self.store.save(self.state)
-            ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+            try:
+                ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+            except (OSError, RuntimeError):
+                self._mark_update_recovery_required(instance, "Pack update journal cleanup was not durable", force_recovery=True)
+                raise
             self.instance_status_label.setText(f"Updated: {instance['name']}")
             self.diagnostic_hint_label.setText(f"Update complete; backup saved at {result['backup']}")
         except (ModrinthPackUpdateError, ModrinthPackError, OSError, RuntimeError) as error:
@@ -1752,7 +1765,11 @@ class LauncherWindow(QMainWindow):
         try:
             instance.update(self._update_worker.instance_result)
             self.store.save(self.state)
-            ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+            try:
+                ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
+            except (OSError, RuntimeError):
+                self._mark_update_recovery_required(instance, "Pack update journal cleanup was not durable", force_recovery=True)
+                raise
         except (OSError, RuntimeError) as error:
             self._mark_update_recovery_required(instance, str(error))
             self._set_session_controls_locked(False)
@@ -1799,7 +1816,11 @@ class LauncherWindow(QMainWindow):
             instance_root = self.store.instance_minecraft_root(instance["id"])
             updater.recover(instance, instance_root)
             self.store.save(self.state)
-            ModrinthPackUpdater._durable_unlink(instance_root.parent / "update-journal.json")
+            try:
+                ModrinthPackUpdater._durable_unlink(instance_root.parent / "update-journal.json")
+            except (OSError, RuntimeError):
+                self._mark_update_recovery_required(instance, "Pack recovery journal cleanup was not durable", force_recovery=True)
+                raise
             self.instance_status_label.setText(f"Recovered: {instance['name']}")
             self.diagnostic_hint_label.setText("The previous Modrinth release and worlds were restored.")
         except (ModrinthPackUpdateError, OSError, RuntimeError) as error:
@@ -1832,17 +1853,18 @@ class LauncherWindow(QMainWindow):
     def _update_journal_exists(self, instance: dict | None) -> bool:
         return bool(instance and instance.get("id") and self._update_journal_path(instance).is_file())
 
-    def _mark_update_recovery_required(self, instance: dict, message: str) -> None:
+    def _mark_update_recovery_required(self, instance: dict, message: str, *, force_recovery: bool = False) -> None:
         journal = self._update_journal_path(instance)
+        journal_exists = journal.is_file()
         try:
-            data = json.loads(journal.read_text(encoding="utf-8")) if journal.is_file() else {}
+            data = json.loads(journal.read_text(encoding="utf-8")) if journal_exists else {}
         except (OSError, json.JSONDecodeError):
             data = {}
         if isinstance(data, dict) and isinstance(data.get("backup"), str):
             instance["recovery_backup"] = data["backup"]
         instance["ready"] = False
         instance["install_state"] = "failed"
-        instance["update_recovery_required"] = True
+        instance["update_recovery_required"] = force_recovery or journal_exists or bool(instance.get("update_recovery_required"))
         instance["install_error"] = message or "Pack update recovery is required"
         if not self.store.recovery_required:
             try:

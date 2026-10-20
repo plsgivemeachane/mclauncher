@@ -379,6 +379,8 @@ class ModrinthPackUpdater:
         root = Path(minecraft_directory)
         if not root.is_dir():
             raise ModrinthPackUpdateError("The selected Modrinth instance has no usable data directory")
+        if (root.parent / "update-journal.json").is_file():
+            raise ModrinthPackUpdateError("An interrupted pack update must be recovered before starting another update")
         progress = on_progress or (lambda *_args: None)
         stage = Path(tempfile.mkdtemp(prefix=".modrinth-update-", dir=str(root.parent)))
         backup_root = root.parent / "backups"
