@@ -996,7 +996,7 @@ class LauncherWindow(QMainWindow):
                 on_progress=self._show_import_progress,
             )
             instance.update(
-                version=metadata["game_version"], loader=metadata["loader"],
+                version=metadata["game_version"], minecraft_version=metadata["game_version"], loader=metadata["loader"],
                 loader_version=metadata["loader_version"], installed_files=metadata["installed_files"],
                 pack_format=metadata["format"], install_state="imported", ready=False, install_error="",
             )
@@ -1021,7 +1021,7 @@ class LauncherWindow(QMainWindow):
             instance["install_error"] = str(error) or "Modrinth pack import failed"
             self.store.save(self.state)
             self.instance_status_label.setText(f"Import failed: {instance['install_error']}")
-            self.diagnostic_hint_label.setText("Choose a supported Fabric .mrpack and retry the import.")
+            self.diagnostic_hint_label.setText("Choose a supported Modrinth .mrpack and retry the import.")
         finally:
             self._refresh_install_button()
             self._refresh_play_button()

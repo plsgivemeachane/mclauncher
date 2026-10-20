@@ -81,12 +81,50 @@ class MinecraftInstaller:
                         on_progress: ProgressCallback) -> None:
         """Prepare a supported modpack through an explicit installer boundary.
 
-        The base launcher ships the vanilla contract only.  A Fabric-aware
-        adapter must implement this method and install the loader profile and
-        managed runtime before the window can mark a pack ready.
+        Forge is installed through minecraft-launcher-lib's official loader
+        adapter.  The declared loader version is checked against the exact
+        Minecraft version before any loader installation is attempted.
         """
-        del instance, minecraft_directory, metadata, on_progress
-        raise RuntimeError("Fabric modpack installation is unavailable in this launcher build")
+        loader = metadata.get("loader")
+        game = metadata.get("game_version")
+        loader_version = metadata.get("loader_version")
+        if loader != "forge":
+            raise RuntimeError(f"{str(loader).capitalize() if loader else 'Unknown'} modpack installation is unavailable in this launcher build")
+        if not isinstance(game, str) or not game or not isinstance(loader_version, str) or not loader_version:
+            raise RuntimeError("Forge pack is missing its exact Minecraft or Forge version")
+        try:
+            forge = minecraft_launcher_lib.mod_loader.get_mod_loader("forge")
+            supported = forge.get_loader_versions(game, False)
+        except Exception as error:
+            raise RuntimeError(f"Could not verify Forge {loader_version} for Minecraft {game}: {error}") from error
+        if loader_version not in supported:
+            raise RuntimeError(f"Forge {loader_version} is unavailable for Minecraft {game}; choose the declared supported release")
+
+        def set_status(status: str) -> None:
+            on_progress(status, -1, -1)
+
+        def set_progress(progress: int) -> None:
+            on_progress("", progress, -1)
+
+        def set_maximum(maximum: int) -> None:
+            on_progress("", -1, maximum)
+
+        try:
+            installed_version = forge.install(
+                game,
+                minecraft_directory,
+                loader_version=loader_version,
+                callback={"setStatus": set_status, "setProgress": set_progress, "setMax": set_maximum},
+            )
+        except Exception as error:
+            raise RuntimeError(f"Forge {loader_version} installation failed for Minecraft {game}: {error}") from error
+        if not isinstance(installed_version, str) or not installed_version:
+            raise RuntimeError(f"Forge {loader_version} did not produce an installed launcher profile")
+        instance["minecraft_version"] = game
+        instance["version"] = installed_version
+        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(installed_version, minecraft_directory)
+        if not runtime_info or not runtime_info.get("name"):
+            raise RuntimeError(f"Forge {loader_version} installed without a managed Java runtime")
 
     @staticmethod
     def _validate_installation(version: str, minecraft_directory: Path) -> None:
