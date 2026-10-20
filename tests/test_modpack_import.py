@@ -56,4 +56,3 @@ def test_importer_rejects_unsupported_loader_and_traversal_before_writes(tmp_pat
             tmp_path / "escape.mrpack", tmp_path / "escape"
         )
     assert not (tmp_path / "outside.jar").exists()
-

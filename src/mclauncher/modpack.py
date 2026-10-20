@@ -193,4 +193,3 @@ class ModrinthPackImporter:
     # Provider-facing name kept alongside the archive-oriented API for callers
     # that model the operation as importing a pack release.
     import_pack = import_archive
-
