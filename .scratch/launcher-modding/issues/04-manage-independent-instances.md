@@ -4,7 +4,7 @@
 
 **Blocked by:** [03: Ship the Minecraft home and navigation](03-ship-minecraft-home-and-navigation.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] From Instances, rename an instance without changing its identity, source metadata, or data directory; retain the name after reopening.
 - [ ] Duplicate an instance with a new identity and independent copied worlds/settings/content; changes to the duplicate cannot modify the original.
@@ -16,3 +16,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

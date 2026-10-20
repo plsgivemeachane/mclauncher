@@ -4,7 +4,7 @@
 
 **Blocked by:** [05: Import and play a Fabric Modrinth pack](05-import-and-play-fabric-modrinth-pack.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] The selected instance has a Mods page listing installed content and persisted enabled/disabled state.
 - [ ] Import a compatible local mod JAR only into that instance, rejecting known game/loader incompatibility and explaining unknown metadata without presenting it as verified.
@@ -16,3 +16,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

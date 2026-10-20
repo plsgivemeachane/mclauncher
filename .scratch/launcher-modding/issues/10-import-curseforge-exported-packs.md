@@ -4,7 +4,7 @@
 
 **Blocked by:** [06: Import and play Forge packs](06-import-and-play-forge-packs.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Import a CurseForge exported-pack ZIP into a distinct instance using its manifest, overrides, declared game version, and supported loader; start with the available Fabric/Forge paths.
 - [ ] Resolve accessible required files through permitted provider mechanisms. Archive import must not assume integrated CurseForge catalog access or that every file is embedded.
@@ -16,3 +16,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

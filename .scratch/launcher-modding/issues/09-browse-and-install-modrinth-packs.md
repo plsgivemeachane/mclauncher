@@ -4,7 +4,7 @@
 
 **Blocked by:** [03: Ship the Minecraft home and navigation](03-ship-minecraft-home-and-navigation.md); [05: Import and play a Fabric Modrinth pack](05-import-and-play-fabric-modrinth-pack.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Browse opens a working integrated Modrinth pack catalog with search, pack details, available releases, and release selection.
 - [ ] Installing the selected release creates an independent instance and uses the established preparation-to-Play flow, retaining provider/release identity.
@@ -16,3 +16,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

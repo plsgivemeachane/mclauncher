@@ -4,7 +4,7 @@
 
 **Blocked by:** [05: Import and play a Fabric Modrinth pack](05-import-and-play-fabric-modrinth-pack.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Import a representative Forge pack through the established archive flow, automatically prepare its exact declared Forge/game/runtime requirements, and launch that instance.
 - [ ] Validate actual supported Forge combinations against official sources; present a useful error for unsupported releases rather than silently substituting another loader/version.
@@ -15,3 +15,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

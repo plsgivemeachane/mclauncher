@@ -4,7 +4,7 @@
 
 **Blocked by:** [10: Import CurseForge exported packs](10-import-curseforge-exported-packs.md); [14: Update Modrinth packs with recovery](14-update-modrinth-packs-with-recovery.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Choose a newer exported-pack ZIP to explicitly update an existing CurseForge instance while retaining its identity and independent player data.
 - [ ] Reuse backed-up update behavior: backup before replacement, preserve worlds, warn about local changes, and publish the release only after complete preparation.
@@ -15,3 +15,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

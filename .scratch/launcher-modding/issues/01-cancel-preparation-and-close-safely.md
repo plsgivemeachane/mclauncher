@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Closing during active or stalled preparation cancels work and permits prompt application exit without waiting for the entire download or an indefinitely stalled request; the window remains responsive.
 - [ ] Persist the interrupted instance and pinned version without marking partial preparation ready. Reopening offers recovery through Play for the same instance.
@@ -16,3 +16,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

@@ -4,7 +4,7 @@
 
 **Blocked by:** [03: Ship the Minecraft home and navigation](03-ship-minecraft-home-and-navigation.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Home shows readable Minecraft release/news cards and a secondary launcher changelog using a verified content source.
 - [ ] Cache fetched content for subsequent offline use; empty cache, failed requests, and malformed feed responses produce a usable home screen.
@@ -15,3 +15,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

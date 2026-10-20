@@ -4,7 +4,7 @@
 
 **Blocked by:** [09: Browse and install Modrinth packs](09-browse-and-install-modrinth-packs.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] An existing Modrinth instance can explicitly select a new catalog release or replacement .mrpack for update without creating an unintended new instance.
 - [ ] Create a usable recovery backup before replacing content, preserve worlds, and warn before replacing locally changed mods/configuration.
@@ -16,3 +16,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

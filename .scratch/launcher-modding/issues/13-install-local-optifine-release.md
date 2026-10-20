@@ -4,7 +4,7 @@
 
 **Blocked by:** [06: Import and play Forge packs](06-import-and-play-forge-packs.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] Accept a player-selected official OptiFine JAR and install a supported standalone setup or a verified compatible Forge setup through the launcher.
 - [ ] Check exact game/OptiFine/Forge compatibility against authoritative evidence, preserving the selected instance and existing vanilla/pack worlds.
@@ -16,3 +16,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.

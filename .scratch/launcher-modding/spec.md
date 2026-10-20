@@ -1,6 +1,6 @@
 # Responsive launcher, integrated modding, and Minecraft home screen
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Problem Statement
 
@@ -148,3 +148,7 @@ Official evidence gathered during the interview:
 - [OptiFine downloads](https://optifine.net/downloads) lists releases and compatibility. Research found no documented automated launcher download contract.
 
 Choose concrete provider request mappings, supported per-version loader combinations, the news source, and distributable artwork during implementation using verified evidence. These are implementation/validation tasks within the agreed scope, not unanswered product interview questions. Publishing this specification changes no application behavior.
+
+## Implementation handoff
+
+Integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests); compileall and `git diff --check` passed. Remaining live-provider, native desktop, and final-package validation is tracked in issue 17.

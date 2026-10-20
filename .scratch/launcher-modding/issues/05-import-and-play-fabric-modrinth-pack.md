@@ -4,7 +4,7 @@
 
 **Blocked by:** [01: Cancel preparation and close safely](01-cancel-preparation-and-close-safely.md); [02: Lock launch controls for the full session](02-lock-launch-controls-for-the-full-session.md).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] A player selects a valid Fabric .mrpack, gets a distinct modpack instance, and prepares and plays its declared Minecraft/Fabric release without manually assembling prerequisites.
 - [ ] Persist provider/release identity, loader/game requirements, installed content, and recoverable preparation state. Preserve legacy saved setups and separate packs from automatic vanilla instances.
@@ -17,3 +17,7 @@
 ## Parent
 
 [Approved specification](../spec.md). Follow its glossary, ADRs, scope limits, and approved launcher-window testing boundary.
+
+## Comments
+
+Implementation is integrated on `integration/launcher-modding` at `4f29049`. The final automated suite passed (156 tests), and compileall plus `git diff --check` passed. Remaining live/package/desktop acceptance is recorded in issue 17.
