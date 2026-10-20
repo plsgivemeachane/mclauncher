@@ -307,6 +307,23 @@ class ModrinthPackUpdater:
         cls._fsync_file(root)
 
     @classmethod
+    def _durable_paths(cls, root: Path, paths) -> None:
+        directories = {root}
+        for path in paths:
+            candidate = Path(path)
+            if candidate.is_file():
+                cls._fsync_file(candidate)
+            directories.add(candidate.parent)
+        for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+            if directory.is_dir():
+                cls._fsync_file(directory)
+
+    @classmethod
+    def _durable_unlink(cls, path: Path) -> None:
+        path.unlink(missing_ok=True)
+        cls._fsync_file(path.parent)
+
+    @classmethod
     def _publish_journal(cls, journal: Path, data: dict) -> None:
         temporary = None
         try:
@@ -409,18 +426,22 @@ class ModrinthPackUpdater:
             progress("Backed up current instance", 0, 1)
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
+            changed_paths = []
             for relative in old_files - set(metadata.get("installed_files", [])):
                 destination = _inside(root, _safe_relative_path(relative, label="installed file"))
                 if destination.is_file():
                     destination.unlink()
+                changed_paths.append(destination)
             for source in sorted(stage.rglob("*")):
                 if source.is_file():
                     relative = PurePosixPath(source.relative_to(stage).as_posix())
                     destination = _inside(root, relative)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, destination)
+                    changed_paths.append(destination)
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
+            self._durable_paths(root, changed_paths)
             instance.update(
                 provider=metadata.get("provider", instance.get("provider", "modrinth")), pack_source=str(archive_path),
                 game_version=metadata["game_version"], loader=metadata["loader"],
@@ -436,11 +457,12 @@ class ModrinthPackUpdater:
             if backup.is_dir():
                 try:
                     self._copy_tree(backup, root)
+                    self._durable_tree(root)
                 except OSError as recovery_error:
                     raise ModrinthPackUpdateError(
                         f"Update failed and recovery failed: {recovery_error}"
                     ) from error
-                journal.unlink(missing_ok=True)
+                self._durable_unlink(journal)
             if isinstance(error, ModrinthPackError):
                 raise
             raise ModrinthPackUpdateError(f"Modrinth pack update failed: {error}") from error
@@ -473,7 +495,8 @@ class ModrinthPackUpdater:
         except (OSError, json.JSONDecodeError):
             journal_data = {}
         self._copy_tree(backup, root)
-        journal.unlink(missing_ok=True)
+        self._durable_tree(root)
+        self._durable_unlink(journal)
         previous_instance = journal_data.get("previous_instance") if isinstance(journal_data, dict) else None
         if isinstance(previous_instance, dict):
             instance.clear()

@@ -130,8 +130,16 @@ class LauncherStore:
             latest = self._read_state_for_save()
             merged = self._merge_concurrent_changes(latest, state)
             temporary = self.state_path.with_name(f"state.json.tmp-{uuid.uuid4().hex}")
-            temporary.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            temporary.replace(self.state_path)
+            with temporary.open("w", encoding="utf-8") as stream:
+                stream.write(json.dumps(merged, indent=2, sort_keys=True) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.state_path)
+            directory = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         old_instances = {item.get("id"): item for item in state.get("instances", []) if isinstance(item, dict)}
         for item in merged.get("instances", []):

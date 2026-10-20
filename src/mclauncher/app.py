@@ -1349,7 +1349,7 @@ class LauncherWindow(QMainWindow):
             if self._catalog_worker.updating:
                 instance.update(self._catalog_worker.instance_result)
                 self.store.save(self.state)
-                (self.store.instance_root(instance["id"]) / "update-journal.json").unlink(missing_ok=True)
+                ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
                 self.modrinth_catalog_status.setText(f"Updated {title} {release.version_number or release.name}.")
             else:
                 self._finish_pack_install(instance, self._catalog_worker.metadata, self._catalog_worker.instance_result, title)
@@ -1718,7 +1718,7 @@ class LauncherWindow(QMainWindow):
                 raise ModrinthPackUpdateError("Updated files are incomplete; recover from the recorded backup")
             instance["install_state"] = "ready"
             self.store.save(self.state)
-            (self.store.instance_root(instance["id"]) / "update-journal.json").unlink(missing_ok=True)
+            ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
             self.instance_status_label.setText(f"Updated: {instance['name']}")
             self.diagnostic_hint_label.setText(f"Update complete; backup saved at {result['backup']}")
         except (ModrinthPackUpdateError, ModrinthPackError, OSError, RuntimeError) as error:
@@ -1742,7 +1742,7 @@ class LauncherWindow(QMainWindow):
         instance = self._update_worker_instance
         instance.update(self._update_worker.instance_result)
         self.store.save(self.state)
-        (self.store.instance_root(instance["id"]) / "update-journal.json").unlink(missing_ok=True)
+        ModrinthPackUpdater._durable_unlink(self.store.instance_root(instance["id"]) / "update-journal.json")
         self.instance_status_label.setText(f"Updated: {instance['name']}")
         self.diagnostic_hint_label.setText("Update complete; the previous release is backed up.")
         self._set_session_controls_locked(False)
