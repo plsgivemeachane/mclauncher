@@ -54,14 +54,12 @@ from .modpack import (
 )
 from .modrinth_catalog import ModrinthCatalog, ModrinthCatalogError, ModrinthRelease
 from .modrinth_mods import ModrinthModInstallError, ModrinthModInstaller
-from .news import MinecraftNewsFeed
 from .optifine import OptiFineError, OptiFineInstaller
 from .localmods import copy_mod_to_instance, inspect_mod_jar
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
 _ACTIVE_INSTALL_WORKERS: set[QThread] = set()
-_ACTIVE_NEWS_WORKERS: set[QThread] = set()
 
 
 def _release_discovery_worker(worker: QThread) -> None:
@@ -166,9 +164,9 @@ class LauncherWindow(QMainWindow):
         self.install_worker = None
         self.installing_instance = None
         self.discovery_worker = None
-        self.news_worker = None
-        self._news_provider_injected = news_provider is not None
-        self.news_provider = news_provider or MinecraftNewsFeed()
+        # ``news_provider`` remains accepted for callers upgrading from older
+        # releases, but news is no longer part of the launcher product.
+        del news_provider
         self._launch_after_prepare = False
         self._operation_instance_id = None
         self._operation_selector_value = None
@@ -447,25 +445,6 @@ class LauncherWindow(QMainWindow):
         browse_panel = QWidget(root)
         browse_layout = QVBoxLayout(browse_panel)
         browse_layout.setContentsMargins(26, 20, 26, 20)
-        news_panel = QFrame(browse_panel)
-        news_panel.setObjectName("newsPanel")
-        news_layout = QVBoxLayout(news_panel)
-        news_layout.setContentsMargins(12, 10, 12, 10)
-        news_layout.setSpacing(6)
-        self.news_heading = QLabel("Minecraft news", news_panel)
-        self.news_heading.setObjectName("newsHeading")
-        news_layout.addWidget(self.news_heading)
-        self.news_cards = QHBoxLayout()
-        self.news_cards.setSpacing(8)
-        news_layout.addLayout(self.news_cards)
-        changelog_heading = QLabel("Launcher changes", news_panel)
-        changelog_heading.setObjectName("changelogHeading")
-        news_layout.addWidget(changelog_heading)
-        self.launcher_changelog = QLabel(news_panel)
-        self.launcher_changelog.setObjectName("launcherChangelog")
-        self.launcher_changelog.setWordWrap(True)
-        news_layout.addWidget(self.launcher_changelog)
-        browse_layout.addWidget(news_panel)
         browse_layout.addWidget(QLabel("Modrinth modpacks"))
         browse_search_row = QHBoxLayout()
         self.modrinth_search_input = QLineEdit(browse_panel)
@@ -590,10 +569,6 @@ class LauncherWindow(QMainWindow):
             QLineEdit:focus, QComboBox:focus, QPushButton:focus { border: 2px solid #a6e175; }
             QProgressBar { background: #3a473c; border: 0; border-radius: 2px; height: 4px; }
             QProgressBar::chunk { background: #a6e175; }
-            QFrame#newsPanel { background: #101712; border: 1px solid #536052; border-radius: 10px; }
-            QLabel#newsHeading, QLabel#changelogHeading { color: #e6f4dc; font-weight: 700; }
-            QLabel#newsCard { background: #26352a; border: 1px solid #526452; border-radius: 6px; padding: 8px; color: #eef3e9; }
-            QLabel#launcherChangelog { color: #c7d2c9; }
             QLabel#modsWarningLabel { color: #e7c17a; }
             QLabel#modsHeading { color: #e6f4dc; font-size: 18px; font-weight: 700; }
             QLabel#modsInstanceLabel { color: #c7d2c9; }
@@ -728,58 +703,6 @@ class LauncherWindow(QMainWindow):
         worker = self.discovery_worker
         self.discovery_worker = None
 
-    def _start_news_fetch(self) -> None:
-        if not self._news_provider_injected and QApplication.platformName() == "offscreen":
-            return
-        self.news_worker = NewsWorker(self.news_provider)
-        _ACTIVE_NEWS_WORKERS.add(self.news_worker)
-        self.news_worker.fetched.connect(self._news_fetched)
-        self.news_worker.failed.connect(self._news_failed)
-        self.news_worker.finished.connect(self._news_finished)
-        self.news_worker.finished.connect(lambda worker=self.news_worker: _ACTIVE_NEWS_WORKERS.discard(worker))
-        self.news_worker.start()
-
-    def _news_fetched(self, items: list[dict[str, str]]) -> None:
-        self.state["news_items"] = items
-        self.state["news_fetched_at"] = datetime.now(timezone.utc).isoformat()
-        if not self.store.recovery_required:
-            self.store.save(self.state)
-        self._render_news(items)
-
-    def _news_failed(self, message: str) -> None:
-        del message
-        if not self.state.get("news_items"):
-            self._render_news([])
-
-    def _news_finished(self) -> None:
-        self.news_worker = None
-
-    def _render_news(self, items: list[dict[str, str]]) -> None:
-        while self.news_cards.count():
-            item = self.news_cards.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        cards = items[:3]
-        if not cards:
-            empty = QLabel("Minecraft news is unavailable offline.")
-            empty.setObjectName("newsCard")
-            empty.setWordWrap(True)
-            self.news_cards.addWidget(empty)
-        else:
-            for article in cards:
-                title = str(article.get("title", "Minecraft news"))
-                published = str(article.get("published", ""))
-                card = QLabel(f"{title}\n{published}" if published else title)
-                card.setObjectName("newsCard")
-                card.setWordWrap(True)
-                card.setMinimumWidth(170)
-                card.setToolTip(str(article.get("url", "")))
-                self.news_cards.addWidget(card, 1)
-        self.launcher_changelog.setText(
-            f"mclauncher {__version__}: responsive preparation, isolated instances, and cached Minecraft news."
-        )
-
     def _open_settings(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
@@ -862,8 +785,6 @@ class LauncherWindow(QMainWindow):
         self.state.setdefault("available_version_metadata", [])
         self.state.setdefault("show_snapshots", False)
         self.state.setdefault("background_path", "")
-        self.state.setdefault("news_items", [])
-        self.state.setdefault("news_fetched_at", "")
         if "memory_gib" not in self.state and not self.store.recovery_required:
             self.state["memory_gib"] = default_memory_gib()
             self.store.save(self.state)
@@ -926,8 +847,6 @@ class LauncherWindow(QMainWindow):
                 self.setup_selector.setToolTip(self.setup_selector.itemText(selected_index))
         self._restoring_state = False
         self._restore_running_game()
-        self._render_news(self.state.get("news_items", []))
-        self._start_news_fetch()
 
     def _append_cached_versions(self) -> None:
         selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
@@ -3265,27 +3184,6 @@ class InstallWorker(QThread):
 
 class InstallationCancelled(Exception):
     """Internal worker signal used to suppress results after launcher close."""
-
-
-class NewsWorker(QThread):
-    fetched = Signal(list)
-    failed = Signal(str)
-
-    def __init__(self, provider) -> None:
-        super().__init__()
-        self.provider = provider
-
-    def run(self) -> None:
-        try:
-            items = self.provider.fetch()
-            if self.isInterruptionRequested():
-                return
-            if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
-                raise ValueError("news provider returned an invalid response")
-            self.fetched.emit(items[:6])
-        except Exception as error:
-            if not self.isInterruptionRequested():
-                self.failed.emit(str(error) or "unknown news error")
 
 
 def _release_install_worker(worker: QThread) -> None:
