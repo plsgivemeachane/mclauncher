@@ -38,7 +38,7 @@ def _ready_window(tmp_path, player):
     return window
 
 
-def test_launcher_uses_landscape_launch_bar_layout_with_visible_public_controls(tmp_path):
+def test_launcher_uses_home_artwork_launch_bar_with_visible_public_controls(tmp_path):
     application = QApplication.instance() or QApplication([])
     window = LauncherWindow(data_root=tmp_path / "launcher-data")
     window.show()
@@ -49,7 +49,9 @@ def test_launcher_uses_landscape_launch_bar_layout_with_visible_public_controls(
     assert window.minimumSize().width() <= 680
     assert window.minimumSize().height() <= 420
     assert window.findChild(QLabel, "brandLabel").isVisible()
-    assert window.findChild(QWidget, "landscapePanel").isVisible()
+    assert window.home_artwork.isVisible()
+    assert window.home_nav_button.isVisible()
+    assert window.instances_nav_button.isVisible()
     assert window.findChild(QWidget, "launchBar").isVisible()
     assert window.username_input.isVisible()
     assert window.setup_selector.isVisible()
