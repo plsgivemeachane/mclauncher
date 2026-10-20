@@ -2,7 +2,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QDialog, QLineEdit, QPushButton, QWidget
 
 from mclauncher.app import LauncherWindow, local_identity
 
@@ -160,5 +160,33 @@ def test_launch_failure_restores_session_controls(tmp_path):
     assert window.setup_selector.isEnabled()
     assert window.settings_button.isEnabled()
     assert window.play_button.isEnabled()
+    window.close()
+    application.processEvents()
+
+
+def test_settings_automatically_saves_memory_and_contains_instance_actions(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+    root = tmp_path / "launcher-data"
+    window = _ready_window(root, RunningPlayer())
+    dialogs = []
+
+    def inspect_settings(dialog):
+        dialogs.append(dialog)
+        memory = dialog.findChild(QLineEdit, "settingsMemoryInput")
+        assert memory is not None
+        memory.setText("4")
+        memory.editingFinished.emit()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", inspect_settings)
+    window._open_settings()
+
+    assert len(dialogs) == 1
+    assert window.state["memory_gib"] == 4
+    assert window.store.load()["memory_gib"] == 4
+    labels = {button.text() for button in dialogs[0].findChildren(QPushButton)}
+    assert "Open selected setup folder" in labels
+    assert "Export diagnostic log" in labels
+    assert not window.memory_input.isVisible()
     window.close()
     application.processEvents()
