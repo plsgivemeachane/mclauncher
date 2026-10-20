@@ -957,17 +957,23 @@ class LauncherWindow(QMainWindow):
         self.instance_list.setCurrentRow(self.instance_list.count() - 1)
         self.instance_name_input.clear()
 
-    def _mutation_blocked(self, instance: dict | None) -> bool:
+    def _mutation_blocked(self, instance: dict | None, *, report: bool = True) -> bool:
         if instance is None:
             return True
         instance_id = instance.get("id")
         active_id = self.installing_instance.get("id") if self.installing_instance else None
         running_id = self.game_instance.get("id") if self.game_instance else None
         if instance_id in {active_id, running_id, self._operation_instance_id}:
-            self.diagnostic_hint_label.setText("This instance is active; wait until its preparation or game exits.")
+            if report:
+                self.diagnostic_hint_label.setText(
+                    "This instance is active; wait until its preparation or game exits."
+                )
             return True
         if instance.get("install_state") == "installing":
-            self.diagnostic_hint_label.setText("This instance is being prepared; wait until preparation finishes.")
+            if report:
+                self.diagnostic_hint_label.setText(
+                    "This instance is being prepared; wait until preparation finishes."
+                )
             return True
         return False
 
@@ -1113,7 +1119,7 @@ class LauncherWindow(QMainWindow):
 
     def _refresh_instance_mutation_buttons(self) -> None:
         instance = self._selected_instance()
-        blocked = self._mutation_blocked(instance) if instance is not None else True
+        blocked = self._mutation_blocked(instance, report=False) if instance is not None else True
         enabled = instance is not None and not blocked and not self._session_controls_locked
         self.rename_instance_button.setEnabled(enabled)
         self.duplicate_instance_button.setEnabled(enabled)
