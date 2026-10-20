@@ -115,7 +115,7 @@ class LauncherWindow(QMainWindow):
         self._installer_injected = installer is not None
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
-        self.modpack_importer = modpack_importer or ModrinthPackImporter()
+        self.modpack_importer = modpack_importer or ModrinthPackImporter(provider=self.installer)
         self.install_worker = None
         self.installing_instance = None
         self.discovery_worker = None
@@ -1002,13 +1002,15 @@ class LauncherWindow(QMainWindow):
             )
             installer_method = getattr(self.installer, "install_modpack", None)
             if not callable(installer_method):
-                raise UnsupportedModrinthPack("The configured installer cannot prepare Fabric packs")
+                raise UnsupportedModrinthPack(
+                    f"The configured installer cannot prepare {metadata.get('loader', 'this')} packs"
+                )
             installer_method(instance, self.store.instance_minecraft_root(instance["id"]), metadata, self._show_import_progress)
             ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
             instance["ready"] = ready
             instance["install_state"] = "ready" if ready else "incomplete"
             if not ready:
-                instance["install_error"] = "Required Minecraft, Fabric, or runtime files are incomplete"
+                instance["install_error"] = "Required Minecraft, NeoForge, or runtime files are incomplete"
             self.store.save(self.state)
             self.instance_status_label.setText(
                 f"Ready: {instance['name']} ({instance['version']})" if ready
@@ -1021,7 +1023,9 @@ class LauncherWindow(QMainWindow):
             instance["install_error"] = str(error) or "Modrinth pack import failed"
             self.store.save(self.state)
             self.instance_status_label.setText(f"Import failed: {instance['install_error']}")
-            self.diagnostic_hint_label.setText("Choose a supported Fabric .mrpack and retry the import.")
+            self.diagnostic_hint_label.setText(
+                "Choose a supported Fabric or NeoForge .mrpack and retry the import."
+            )
         finally:
             self._refresh_install_button()
             self._refresh_play_button()

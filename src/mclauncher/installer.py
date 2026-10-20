@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 import minecraft_launcher_lib
+from minecraft_launcher_lib import mod_loader
 from PySide6.QtCore import QObject, QTimer
 
 from . import __version__
@@ -79,14 +80,53 @@ class MinecraftInstaller:
 
     def install_modpack(self, instance: dict, minecraft_directory: Path, metadata: dict,
                         on_progress: ProgressCallback) -> None:
-        """Prepare a supported modpack through an explicit installer boundary.
+        """Install the exact declared loader through launcher-lib's official adapter."""
+        loader = metadata.get("loader")
+        game = metadata.get("game_version")
+        loader_version = metadata.get("loader_version")
+        loader_id = {"fabric": "fabric", "neoforge": "neoforge"}.get(loader)
+        if loader_id is None:
+            raise RuntimeError(f"{loader or 'Unknown'} modpack installation is unavailable in this launcher build")
+        if not isinstance(game, str) or not isinstance(loader_version, str):
+            raise RuntimeError(f"{loader.title() if isinstance(loader, str) else 'Modpack'} metadata is incomplete")
+        support = self.resolve_loader(game, loader_id, loader_version)
+        if support is None:
+            display = "NeoForge" if loader_id == "neoforge" else "Fabric"
+            raise RuntimeError(f"{display} {loader_version} is unavailable for Minecraft {game}")
 
-        The base launcher ships the vanilla contract only.  A Fabric-aware
-        adapter must implement this method and install the loader profile and
-        managed runtime before the window can mark a pack ready.
-        """
-        del instance, minecraft_directory, metadata, on_progress
-        raise RuntimeError("Fabric modpack installation is unavailable in this launcher build")
+        def callback_status(status: str) -> None:
+            on_progress(status, -1, -1)
+
+        def callback_progress(progress: int) -> None:
+            on_progress("", progress, -1)
+
+        def callback_maximum(maximum: int) -> None:
+            on_progress("", -1, maximum)
+
+        installed_version = mod_loader.get_mod_loader(loader_id).install(
+            game,
+            minecraft_directory,
+            loader_version=loader_version,
+            callback={"setStatus": callback_status, "setProgress": callback_progress, "setMax": callback_maximum},
+        )
+        if not isinstance(installed_version, str) or not installed_version:
+            raise RuntimeError("NeoForge installer did not report an installed version")
+        instance["launch_version"] = installed_version
+        self._validate_installation(installed_version, minecraft_directory)
+
+    def resolve_loader(self, game: str, loader: str, version: str | None = None) -> dict | None:
+        """Return support only when launcher-lib reports this exact pair."""
+        if loader not in {"fabric", "fabric-loader", "neoforge"} or not isinstance(game, str) or not isinstance(version, str) or not version:
+            return None
+        loader_id = "fabric" if loader == "fabric-loader" else loader
+        try:
+            adapter = mod_loader.get_mod_loader(loader_id)
+            versions = adapter.get_loader_versions(game, False)
+        except Exception:
+            return None
+        if version not in versions:
+            return None
+        return {"loader": loader_id, "game_version": game, "loader_version": version}
 
     @staticmethod
     def _validate_installation(version: str, minecraft_directory: Path) -> None:
@@ -113,7 +153,7 @@ class MinecraftPlayer:
         player_uuid: str,
         memory_gib: int | None = None,
     ):
-        version = instance.get("version")
+        version = instance.get("launch_version") or instance.get("version")
         if not version:
             raise RuntimeError("No Minecraft version is pinned; install the instance first")
         validate_version_id(version)
@@ -144,7 +184,7 @@ class MinecraftPlayer:
 
     @staticmethod
     def is_ready(instance: dict, minecraft_directory: Path) -> bool:
-        version = instance.get("version")
+        version = instance.get("launch_version") or instance.get("version")
         if not version:
             return False
         try:

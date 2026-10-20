@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import urllib.request
+import inspect
 from urllib.parse import urlparse
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -103,15 +104,29 @@ class ModrinthPackImporter:
         if len(loaders) != 1:
             raise UnsupportedModrinthPack("The pack must declare exactly one supported client loader")
         loader, version = loaders[0]
-        if loader != "fabric-loader" or not isinstance(version, str) or not version:
+        supported_loaders = {"fabric-loader": "fabric", "neoforge": "neoforge"}
+        if loader not in supported_loaders or not isinstance(version, str) or not version:
             raise UnsupportedModrinthPack(f"Modrinth loader {loader!r} is not supported yet")
+        if loader == "neoforge" and self.loader_resolver is None:
+            raise UnsupportedModrinthPack(
+                f"NeoForge {version} is unavailable for Minecraft {game}; exact support metadata is required"
+            )
         if self.loader_resolver is not None:
             try:
-                profile = self.loader_resolver(game, version)
+                # Keep the pre-NeoForge two-argument injection seam working while
+                # allowing the resolver to distinguish loader families.
+                parameters = inspect.signature(self.loader_resolver).parameters
+                positional = [p for p in parameters.values() if p.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD
+                )]
+                accepts_loader = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in parameters.values()) or len(positional) >= 3
+                profile = self.loader_resolver(game, loader, version) if accepts_loader else self.loader_resolver(game, version)
             except Exception as error:
-                raise UnsupportedModrinthPack(f"Fabric {version} is unavailable for Minecraft {game}: {error}") from error
+                display = "NeoForge" if loader == "neoforge" else "Fabric"
+                raise UnsupportedModrinthPack(f"{display} {version} is unavailable for Minecraft {game}: {error}") from error
             if profile is False or profile is None:
-                raise UnsupportedModrinthPack(f"Fabric {version} is unavailable for Minecraft {game}")
+                display = "NeoForge" if loader == "neoforge" else "Fabric"
+                raise UnsupportedModrinthPack(f"{display} {version} is unavailable for Minecraft {game}")
         return game, version
 
     def import_archive(
@@ -182,7 +197,7 @@ class ModrinthPackImporter:
                 "provider": "modrinth",
                 "format": "mrpack",
                 "game_version": game,
-                "loader": "fabric",
+                "loader": "neoforge" if "neoforge" in manifest["dependencies"] else "fabric",
                 "loader_version": loader,
                 "installed_files": sorted(set(installed)),
                 "manifest": manifest,
