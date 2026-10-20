@@ -6,6 +6,8 @@ import re
 import shutil
 import time
 import uuid
+import copy
+import fcntl
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +26,21 @@ class LauncherStore:
         self.recovery_required = False
         self.load_error = ""
         self.recovery_backup: Path | None = None
+        self._baseline: dict[str, Any] = {}
+        self.state_lock_path = self.root / "state.lock"
 
     @staticmethod
     def _defaults() -> dict[str, Any]:
-        return {"username": "", "instances": []}
+        return {
+            "username": "",
+            "instances": [],
+            "selected_instance_id": "",
+            "selected_setup_id": "",
+            "automatic_instances": {},
+            "available_versions": [],
+            "available_version_metadata": [],
+            "show_snapshots": False,
+        }
 
     def _backup_corrupt_state(self) -> Path | None:
         if not self.state_path.exists():
@@ -60,6 +73,28 @@ class LauncherStore:
             return self._invalid_state("the top-level value must be an object")
         if not isinstance(value.get("username", ""), str) or not isinstance(value.get("instances", []), list):
             return self._invalid_state("username must be text and instances must be a list")
+        if not isinstance(value.get("selected_instance_id", ""), str):
+            return self._invalid_state("selected_instance_id must be text")
+        if not isinstance(value.get("selected_setup_id", ""), str):
+            return self._invalid_state("selected_setup_id must be text")
+        if not isinstance(value.get("available_versions", []), list) or any(
+            not isinstance(version, str) for version in value.get("available_versions", [])
+        ):
+            return self._invalid_state("available_versions must be a list of text version ids")
+        if not isinstance(value.get("automatic_instances", {}), dict) or any(
+            not isinstance(version, str) or not isinstance(instance_id, str)
+            for version, instance_id in value.get("automatic_instances", {}).items()
+        ):
+            return self._invalid_state("automatic_instances must map text versions to text instance ids")
+        if not isinstance(value.get("available_version_metadata", []), list) or any(
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not isinstance(entry.get("type", "release"), str)
+            for entry in value.get("available_version_metadata", [])
+        ):
+            return self._invalid_state("available_version_metadata must contain version records")
+        if not isinstance(value.get("show_snapshots", False), bool):
+            return self._invalid_state("show_snapshots must be a boolean")
         if "memory_gib" in value and (isinstance(value["memory_gib"], bool) or not isinstance(value["memory_gib"], int)):
             return self._invalid_state("memory_gib must be an integer")
         for instance in value.get("instances", []):
@@ -69,14 +104,65 @@ class LauncherStore:
                 return self._invalid_state(f"unsafe instance id {instance['id']!r}")
         value.setdefault("username", "")
         value.setdefault("instances", [])
+        value.setdefault("selected_instance_id", "")
+        value.setdefault("selected_setup_id", value.get("selected_instance_id", ""))
+        value.setdefault("automatic_instances", {})
+        value.setdefault("available_versions", [])
+        value.setdefault("available_version_metadata", [])
+        value.setdefault("show_snapshots", False)
+        self._baseline = copy.deepcopy(value)
         return value
 
     def save(self, state: dict[str, Any]) -> None:
         if self.recovery_required:
             raise RuntimeError("State recovery is required before saving launcher data")
-        temporary = self.state_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(self.state_path)
+        with self.state_lock_path.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            latest = self._read_state_for_save()
+            merged = self._merge_concurrent_changes(latest, state)
+            temporary = self.state_path.with_name(f"state.json.tmp-{uuid.uuid4().hex}")
+            temporary.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temporary.replace(self.state_path)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        old_instances = {item.get("id"): item for item in state.get("instances", []) if isinstance(item, dict)}
+        for item in merged.get("instances", []):
+            original = old_instances.get(item.get("id"))
+            if original is not None:
+                original.clear()
+                original.update(item)
+        merged["instances"] = [old_instances.get(item.get("id"), item) for item in merged.get("instances", [])]
+        state.clear()
+        state.update(merged)
+        self._baseline = copy.deepcopy(merged)
+
+    def _read_state_for_save(self) -> dict[str, Any]:
+        if not self.state_path.exists():
+            return self._defaults()
+        try:
+            value = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("Launcher state changed to an unreadable file; refusing to overwrite it") from error
+        if not isinstance(value, dict):
+            raise RuntimeError("Launcher state changed to an invalid value; refusing to overwrite it")
+        return value
+
+    def _merge_concurrent_changes(self, latest: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        merged = copy.deepcopy(latest)
+        baseline = self._baseline or latest
+        for key, value in state.items():
+            if key == "instances" or key == "automatic_instances":
+                continue
+            if value != baseline.get(key):
+                merged[key] = copy.deepcopy(value)
+        if state.get("instances") != baseline.get("instances"):
+            by_id = {item.get("id"): copy.deepcopy(item) for item in merged.get("instances", []) if isinstance(item, dict)}
+            for item in state.get("instances", []):
+                if isinstance(item, dict) and item.get("id"):
+                    by_id[item["id"]] = copy.deepcopy(item)
+            merged["instances"] = list(by_id.values())
+        if state.get("automatic_instances") != baseline.get("automatic_instances"):
+            merged["automatic_instances"] = {**merged.get("automatic_instances", {}), **state.get("automatic_instances", {})}
+        return merged
 
     def create_instance_root(self, instance_id: str) -> Path:
         if not self._is_safe_instance_id(instance_id):
@@ -109,6 +195,7 @@ class LauncherStore:
     def recover_defaults(self) -> None:
         if self.recovery_backup is None or not self.recovery_backup.is_file():
             raise RuntimeError("The original launcher state was not backed up; recovery was refused")
+        self.state_path.unlink(missing_ok=True)
         self.recovery_required = False
         self.load_error = ""
         self.save(self._defaults())

@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from mclauncher import __version__
 from mclauncher.app import LauncherWindow, local_identity
 from mclauncher.installer import MinecraftPlayer
 
@@ -99,24 +100,23 @@ def test_player_can_save_identity_create_instance_and_restore_after_restart(tmp_
     application.processEvents()
 
 
-def test_changed_username_requires_warning_then_changes_local_identity(tmp_path):
+def test_changed_username_saves_and_warns_without_confirmation(tmp_path):
     application = QApplication.instance() or QApplication([])
     window = LauncherWindow(data_root=tmp_path / "launcher-data")
     window.show()
     window.username_input.setText("Alex")
-    window.save_username_button.click()
+    window.username_input.editingFinished.emit()
     original_identity = window.identity_label.text()
 
     window.username_input.setText("Sam")
-    window.save_username_button.click()
+    window.username_input.editingFinished.emit()
 
     assert window.username_warning.isVisible()
-    assert window.identity_label.text() == original_identity
-
-    window.confirm_username_change_button.click()
-    assert not window.username_warning.isVisible()
+    assert window.store.load()["username"] == "Sam"
     assert window.username_input.text() == "Sam"
+    assert window.identity_label.text() == f"Local player identity: {local_identity('Sam')}"
     assert window.identity_label.text() != original_identity
+    assert not window.confirm_username_change_button.isVisible()
     window.close()
     application.processEvents()
 
@@ -451,7 +451,7 @@ def test_installation_failure_explains_retry_recovery(tmp_path):
 
     assert "Installation failed" in window.instance_status_label.text()
     assert "Retry installation" in window.install_button.text()
-    assert "Install Minecraft again" in window.diagnostic_hint_label.text()
+    assert "Retry on Play" in window.diagnostic_hint_label.text()
     window.close()
     application.processEvents()
 
@@ -471,6 +471,7 @@ def test_launch_failure_is_saved_for_diagnostics_and_exported(tmp_path, monkeypa
     assert "Play failed: Minecraft files are incomplete" in window.instance_status_label.text()
     assert "Saved diagnostic log" in window.diagnostic_hint_label.text()
     log = output.read_text(encoding="utf-8")
+    assert f"Launcher version: {__version__}" in log
     assert "Instance: Survival" in log
     assert "Version: 1.21.4" in log
     assert "Minecraft files are incomplete" in log
@@ -532,6 +533,89 @@ def test_diagnostic_export_failure_is_readable(tmp_path, monkeypatch):
     application.processEvents()
 
 
+def test_crash_diagnostics_stay_bound_to_game_instance_after_selection_changes(tmp_path, monkeypatch):
+    player = FakePlayer()
+    application, window = _ready_window(tmp_path, player)
+    first = window.state["instances"][0]
+
+    window.instance_name_input.setText("Creative")
+    window.create_instance_button.click()
+    second = window.state["instances"][1]
+    second["version"] = "1.21.4"
+    second["ready"] = True
+    window.store.save(window.state)
+
+    opened = []
+    monkeypatch.setattr("mclauncher.app.QDesktopServices.openUrl", lambda url: opened.append(url) or True)
+    output = tmp_path / "crash-bound.log"
+    monkeypatch.setattr(
+        "mclauncher.app.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(output), "Diagnostic log (*.log)"),
+    )
+
+    window.instance_list.setCurrentRow(0)
+    window.play_button.click()
+    player.finish(exit_code=1, crashed=True)
+    window.instance_list.setCurrentRow(1)
+
+    window.open_folder_button.click()
+    window.save_log_button.click()
+
+    assert opened[0].toLocalFile() == str(window.store.instance_root(first["id"]))
+    assert f"Instance: {first['name']}" in output.read_text(encoding="utf-8")
+    window.close()
+    application.processEvents()
+
+
+def test_running_lifecycle_status_survives_setup_and_version_selection(tmp_path):
+    player = FakePlayer()
+    application, window = _ready_window(tmp_path, player)
+    window.instance_name_input.setText("Creative")
+    window.create_instance_button.click()
+    second = window.state["instances"][1]
+    second["version"] = "1.21.4"
+    second["ready"] = True
+    window.state["available_versions"] = ["1.20.1"]
+    window.store.save(window.state)
+    window._rebuild_setup_selector(selected=window.state["instances"][0]["id"])
+
+    window.instance_list.setCurrentRow(0)
+    window.play_button.click()
+    window.instance_list.setCurrentRow(1)
+    assert window.instance_status_label.text() == "Running: Survival"
+    assert not window.play_button.isEnabled()
+    assert "already running" in window.diagnostic_hint_label.text().lower()
+
+    version_row = window.setup_selector.findData("version:1.20.1")
+    window.setup_selector.setCurrentIndex(version_row)
+    assert window.instance_status_label.text() == "Running: Survival"
+    assert not window.play_button.isEnabled()
+    assert "already running" in window.diagnostic_hint_label.text().lower()
+    window.close()
+    application.processEvents()
+
+
+def test_settings_labels_identify_running_and_last_game_targets(tmp_path, monkeypatch):
+    player = FakePlayer()
+    application, window = _ready_window(tmp_path, player)
+    dialogs = []
+    monkeypatch.setattr("mclauncher.app.QDialog.exec", lambda dialog: dialogs.append(dialog) or 0)
+
+    window.play_button.click()
+    window._open_settings()
+    running_labels = {button.text() for button in dialogs[-1].findChildren(type(window.settings_button))}
+    assert "Open running game folder" in running_labels
+    assert "Export running game diagnostic log" in running_labels
+
+    player.finish()
+    window._open_settings()
+    last_labels = {button.text() for button in dialogs[-1].findChildren(type(window.settings_button))}
+    assert "Open last game folder" in last_labels
+    assert "Export last game diagnostic log" in last_labels
+    window.close()
+    application.processEvents()
+
+
 def test_player_build_command_uses_pinned_identity_runtime_and_instance_directory(tmp_path, monkeypatch):
     import minecraft_launcher_lib
 
@@ -573,3 +657,4 @@ def test_player_build_command_uses_pinned_identity_runtime_and_instance_director
     assert captured["options"]["token"] == ""
     assert captured["options"]["executablePath"] == str(executable)
     assert captured["options"]["gameDirectory"] == str(tmp_path)
+    assert captured["options"]["launcherVersion"] == __version__

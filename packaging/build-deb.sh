@@ -8,7 +8,7 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 PY_SIDE_VERSION=${PY_SIDE_VERSION:-6.12.0}
 MLL_VERSION=${MLL_VERSION:-8.0}
 CONSTRAINTS="$ROOT/packaging/constraints.txt"
-APP_VERSION=$(PYTHONPATH="$ROOT/src" python3 -c 'from importlib.metadata import version; print(version("mclauncher"))' 2>/dev/null || printf '%s\n' 0.1.0)
+APP_VERSION=$(PYTHONPATH="$ROOT/src" "$PYTHON_BIN" -c 'from mclauncher import __version__; print(__version__)')
 PACKAGE=mclauncher
 
 cleanup_deploy_outputs() {

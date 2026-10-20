@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import json
+from urllib.request import urlopen
 from pathlib import Path
 from typing import Callable
 
 import minecraft_launcher_lib
 from PySide6.QtCore import QObject, QTimer
+
+from . import __version__
+
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+
+def validate_version_id(version: str) -> str:
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise ValueError("Minecraft version id is invalid")
+    return version
 
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -16,7 +29,24 @@ class MinecraftInstaller:
     """Application boundary for vanilla installation and managed Java checks."""
 
     def resolve_version(self) -> str:
-        return minecraft_launcher_lib.utils.get_latest_version()["release"]
+        manifest = self._fetch_manifest()
+        return validate_version_id(manifest["latest"]["release"])
+
+    def discover_versions(self) -> list[dict]:
+        """Return concrete release and snapshot choices at the installation boundary."""
+        return [
+            {"id": validate_version_id(item["id"]), "type": item.get("type", "release")}
+            for item in self._fetch_manifest().get("versions", [])
+            if item.get("type") in {"release", "snapshot"} and VERSION_RE.fullmatch(str(item.get("id", "")))
+        ]
+
+    @staticmethod
+    def _fetch_manifest() -> dict:
+        with urlopen(VERSION_MANIFEST_URL, timeout=15) as response:
+            value = json.loads(response.read().decode("utf-8"))
+        if not isinstance(value, dict):
+            raise RuntimeError("Minecraft version manifest was invalid")
+        return value
 
     def install(
         self,
@@ -27,6 +57,7 @@ class MinecraftInstaller:
         version = instance.get("version")
         if not version:
             raise RuntimeError("No Minecraft version is pinned for this installation")
+        validate_version_id(version)
 
         minecraft_directory.mkdir(parents=True, exist_ok=True)
 
@@ -74,6 +105,7 @@ class MinecraftPlayer:
         version = instance.get("version")
         if not version:
             raise RuntimeError("No Minecraft version is pinned; install the instance first")
+        validate_version_id(version)
         version_root = minecraft_directory / "versions" / version
         if not self.is_ready(instance, minecraft_directory):
             raise RuntimeError("Minecraft files are incomplete; install or retry before playing")
@@ -93,7 +125,7 @@ class MinecraftPlayer:
             "executablePath": executable,
             "gameDirectory": str(game_directory),
             "launcherName": "mclauncher",
-            "launcherVersion": "0.1.0",
+            "launcherVersion": __version__,
         }
         if memory_gib is not None:
             options["jvmArguments"] = [f"-Xmx{memory_gib}G", f"-Xms{memory_gib}G"]
@@ -103,6 +135,10 @@ class MinecraftPlayer:
     def is_ready(instance: dict, minecraft_directory: Path) -> bool:
         version = instance.get("version")
         if not version:
+            return False
+        try:
+            validate_version_id(version)
+        except ValueError:
             return False
         version_root = minecraft_directory / "versions" / version
         if not (version_root / f"{version}.json").is_file() or not (version_root / f"{version}.jar").is_file():

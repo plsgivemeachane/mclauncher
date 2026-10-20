@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication
 
 from mclauncher.app import LauncherWindow
 from mclauncher.installer import DetachedMinecraftProcess, MinecraftPlayer
+from mclauncher.installer import MinecraftInstaller
 from mclauncher.persistence import LauncherStore
 
 
@@ -20,7 +21,16 @@ def test_corrupt_state_is_backed_up_and_requires_explicit_recovery(tmp_path):
     with __import__("pytest").raises(RuntimeError):
         store.save({"username": "lost", "instances": []})
     store.recover_defaults()
-    assert json.loads((root / "state.json").read_text()) == {"instances": [], "username": ""}
+    assert json.loads((root / "state.json").read_text()) == {
+        "automatic_instances": {},
+        "available_version_metadata": [],
+        "available_versions": [],
+        "instances": [],
+        "selected_instance_id": "",
+        "selected_setup_id": "",
+        "show_snapshots": False,
+        "username": "",
+    }
 
 
 def test_instance_paths_reject_escape_and_symlink(tmp_path):
@@ -41,7 +51,16 @@ def test_wrong_state_field_type_is_backed_up(tmp_path):
     (root / "state.json").write_text(json.dumps(original), encoding="utf-8")
     store = LauncherStore(root)
     state = store.load()
-    assert state == {"username": "", "instances": []}
+    assert state == {
+        "automatic_instances": {},
+        "available_version_metadata": [],
+        "available_versions": [],
+        "instances": [],
+        "selected_instance_id": "",
+        "selected_setup_id": "",
+        "show_snapshots": False,
+        "username": "",
+    }
     assert json.loads(next(root.glob("state.json.corrupt-*" )).read_text()) == original
 
 
@@ -52,9 +71,17 @@ def test_launcher_surfaces_state_recovery_and_does_not_overwrite_backup(tmp_path
     original = "{not-json"
     (root / "state.json").write_text(original, encoding="utf-8")
     window = LauncherWindow(data_root=root)
+    window.show()
+    app.processEvents()
     assert not window.state_recovery_label.isHidden()
+    assert window.state_recovery_label.isVisible()
+    assert window.recover_state_button.isVisible()
     assert "Recover defaults" in window.state_recovery_label.text()
     assert (root / "state.json").read_text(encoding="utf-8") == original
+    window.recover_state_button.click()
+    assert window.state_recovery_label.isHidden()
+    assert window.recover_state_button.isHidden()
+    assert any(path.read_text(encoding="utf-8") == original for path in root.glob("state.json.corrupt-*"))
     window.close()
     app.processEvents()
 
@@ -92,7 +119,7 @@ def test_detached_process_writes_combined_output_to_instance_log(tmp_path):
     assert seen == [(0, False)]
 
 
-def test_ready_flag_alone_does_not_enable_play(tmp_path):
+def test_ready_flag_alone_keeps_recovery_available_through_play(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = LauncherWindow(data_root=tmp_path / "data", player=MinecraftPlayer())
     window.username_input.setText("Alex")
@@ -103,7 +130,7 @@ def test_ready_flag_alone_does_not_enable_play(tmp_path):
     instance.update(version="1.21.4", ready=True)
     window.store.save(window.state)
     window._select_instance(window.instance_list.currentItem(), None)
-    assert not window.play_button.isEnabled()
+    assert window.play_button.isEnabled()
     window.close()
     app.processEvents()
 
@@ -123,3 +150,95 @@ def test_close_during_install_is_ignored(tmp_path):
     window.installing_instance = None
     window.close()
     app.processEvents()
+
+
+def test_settings_memory_update_syncs_main_launch_field(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    window.state["memory_gib"] = 2
+    window.memory_input.setText("2")
+    window.state["memory_gib"] = 6
+    window.memory_input.setText("6")
+    window._save_memory()
+    assert window.state["memory_gib"] == 6
+    assert window.memory_input.text() == "6"
+    window.close()
+    app.processEvents()
+
+
+def test_invalid_username_is_rejected_before_persistence(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    window.username_input.setText("bad name")
+    window._save_username()
+    assert window.state.get("username", "") == ""
+    assert "3" in window.username_warning.text()
+    window.close()
+    app.processEvents()
+
+
+def test_invalid_version_is_rejected_before_install_path_use(tmp_path):
+    installer = MinecraftInstaller()
+    with __import__("pytest").raises(ValueError):
+        installer.install({"version": "../escape"}, tmp_path / "minecraft", lambda *_: None)
+    with __import__("pytest").raises(ValueError):
+        MinecraftPlayer().build_command({"version": "../escape"}, tmp_path / "minecraft", "Alex", "uuid")
+
+
+def test_first_discovery_persists_latest_stable_selection(tmp_path):
+    app = QApplication.instance() or QApplication([])
+
+    class Installer:
+        def discover_versions(self):
+            return [{"id": "24w01a", "type": "snapshot"}, {"id": "1.21.4", "type": "release"}]
+
+        def resolve_version(self):
+            return "1.21.4"
+
+    window = LauncherWindow(data_root=tmp_path / "data", installer=Installer())
+    window._versions_discovered([
+        {"id": "24w01a", "type": "snapshot"},
+        {"id": "1.21.4", "type": "release"},
+    ])
+    assert window.state["selected_setup_id"] == "version:1.21.4"
+    assert window.store.load()["selected_setup_id"] == "version:1.21.4"
+    window.close()
+    app.processEvents()
+
+
+def test_named_snapshot_does_not_reveal_version_row_when_opted_out(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    instance = {"id": "snapshot-setup-abcdef12", "name": "Snapshot setup", "version": "24w01a", "ready": False}
+    window.state["instances"] = [instance]
+    window.state["available_version_metadata"] = [{"id": "24w01a", "type": "snapshot"}]
+    window.state["show_snapshots"] = False
+    window._rebuild_setup_selector(selected=instance["id"])
+    assert window.setup_selector.findData(instance["id"]) >= 0
+    assert window.setup_selector.findData("version:24w01a") < 0
+    window.close()
+    app.processEvents()
+
+
+def test_uncreated_selected_snapshot_is_hidden_when_opted_out(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow(data_root=tmp_path / "data")
+    window.state["available_version_metadata"] = [{"id": "24w01a", "type": "snapshot"}]
+    window.state["selected_setup_id"] = "version:24w01a"
+    window.state["show_snapshots"] = False
+    window._rebuild_setup_selector(selected="version:24w01a")
+    assert window.setup_selector.findData("version:24w01a") < 0
+    window.close()
+    app.processEvents()
+
+
+def test_save_refuses_to_overwrite_state_corrupted_after_load(tmp_path):
+    root = tmp_path / "data"
+    store = LauncherStore(root)
+    state = store.load()
+    state["username"] = "Alex"
+    store.save(state)
+    (root / "state.json").write_text("{broken", encoding="utf-8")
+    with __import__("pytest").raises(RuntimeError):
+        store.save(state)
+    assert (root / "state.json").read_text(encoding="utf-8") == "{broken"
