@@ -61,6 +61,24 @@ def test_update_backs_up_worlds_warns_local_mods_and_publishes_after_stage(tmp_p
     assert result["local_files"] == ["config/local.toml", "mods/local.jar"]
 
 
+def test_journal_is_durable_before_live_tree_publication(tmp_path):
+    root = tmp_path / "minecraft"
+    instance = _instance(root)
+    updater = ModrinthPackUpdater(FakeImporter())
+    observed = {}
+
+    def publish(journal, data):
+        observed["old_file_present"] = (root / "mods" / "pack-old.jar").is_file()
+        observed["journal_parent"] = journal.parent
+        assert Path(data["backup"]).is_dir()
+        assert not journal.exists()
+        ModrinthPackUpdater._publish_journal(journal, data)
+
+    updater._publish_journal = publish
+    updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: True)
+    assert observed == {"old_file_present": True, "journal_parent": root.parent}
+
+
 def test_update_declined_local_warning_does_not_publish(tmp_path):
     root = tmp_path / "minecraft"
     instance = _instance(root)

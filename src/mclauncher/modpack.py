@@ -290,6 +290,41 @@ class ModrinthPackUpdater:
         shutil.copytree(source, destination)
 
     @staticmethod
+    def _fsync_file(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _durable_tree(cls, root: Path) -> None:
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                cls._fsync_file(path)
+        for path in sorted((path for path in root.rglob("*") if path.is_dir()), key=lambda item: len(item.parts), reverse=True):
+            cls._fsync_file(path)
+        cls._fsync_file(root)
+
+    @classmethod
+    def _publish_journal(cls, journal: Path, data: dict) -> None:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=journal.parent, prefix=".update-journal-", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(data, stream)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, journal)
+            cls._fsync_file(journal.parent)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    @staticmethod
     def _file_hashes(root: Path, paths) -> dict[str, str]:
         hashes = {}
         for relative in paths:
@@ -362,12 +397,15 @@ class ModrinthPackUpdater:
                 raise ModrinthPackUpdateError("Update cancelled because local mod changes were not confirmed")
             backup_root.mkdir(parents=True, exist_ok=True)
             self._copy_tree(root, backup)
-            journal.write_text(json.dumps({
+            journal_data = {
                 "provider": metadata.get("provider", instance.get("provider", "modrinth")),
                 "instance_id": instance.get("id", ""), "backup": str(backup),
                 "archive": str(archive_path), "phase": "backed_up",
                 "previous_instance": previous_instance,
-            }) + "\n", encoding="utf-8")
+            }
+            self._durable_tree(backup)
+            self._fsync_file(backup_root)
+            self._publish_journal(journal, journal_data)
             progress("Backed up current instance", 0, 1)
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
