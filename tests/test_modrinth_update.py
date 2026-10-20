@@ -104,7 +104,8 @@ def test_recovery_syncs_restored_tree_before_journal_unlink(tmp_path, monkeypatc
     monkeypatch.setattr(updater, "_durable_tree", lambda path: (order.append("sync"), original_tree(path))[1])
     monkeypatch.setattr(updater, "_durable_unlink", lambda path: (order.append("unlink"), original_unlink(path))[1])
     updater.recover(instance, root)
-    assert order[:2] == ["sync", "unlink"]
+    assert order == ["sync"]
+    assert (root.parent / "update-journal.json").is_file()
 
 
 def test_update_declined_local_warning_does_not_publish(tmp_path):
@@ -149,7 +150,7 @@ def test_failure_restores_live_tree_and_recovery_restores_backup(tmp_path):
     assert (root / "mods" / "pack-old.jar").read_bytes() == b"old"
     assert not (root / "mods" / "pack-new.jar").exists()
     assert instance["installed_files"] == ["mods/pack-old.jar"]
-    assert not (root.parent / "update-journal.json").exists()
+    assert (root.parent / "update-journal.json").is_file()
 
 
 def test_update_journal_survives_reopen_until_recovery(tmp_path):
@@ -163,7 +164,7 @@ def test_update_journal_survives_reopen_until_recovery(tmp_path):
     instance["update_recovery_required"] = True
     assert instance["ready"] is True
     updater.recover(instance, root)
-    assert not journal.exists()
+    assert journal.is_file()
 
 
 def test_interrupted_update_without_current_journal_does_not_restore_stale_backup(tmp_path):
@@ -233,3 +234,51 @@ def test_window_updates_existing_instance_and_reopens_metadata(tmp_path, monkeyp
     application.processEvents()
     assert reopened.state["instances"][0]["pack_release_id"] == "release-2"
     reopened.close()
+
+
+def test_window_recovery_saves_metadata_before_removing_journal(tmp_path, monkeypatch):
+    application = QApplication.instance() or QApplication([])
+
+    class Updater:
+        def recover(self, instance, root):
+            instance.update(ready=True, install_state="ready", update_recovery_required=False)
+
+    window = LauncherWindow(data_root=tmp_path / "data", modrinth_updater=Updater())
+    window.instance_name_input.setText("Pack")
+    window._create_instance()
+    instance = window.state["instances"][0]
+    instance.update(provider="modrinth", ready=False, install_state="interrupted", update_recovery_required=True)
+    window.store.save(window.state)
+    journal = window.store.instance_root(instance["id"]) / "update-journal.json"
+    journal.write_text("{}\n", encoding="utf-8")
+    events = []
+    original_save = window.store.save
+    monkeypatch.setattr(window.store, "save", lambda state: (events.append("save"), original_save(state))[1])
+    original_unlink = ModrinthPackUpdater._durable_unlink
+    monkeypatch.setattr(ModrinthPackUpdater, "_durable_unlink", staticmethod(lambda path: (events.append("unlink"), original_unlink(path))[1]))
+    window._recover_selected_modrinth_pack()
+    assert events[-2:] == ["save", "unlink"]
+    assert not journal.exists()
+    window.close()
+    application.processEvents()
+
+
+def test_window_recovery_save_failure_keeps_journal(tmp_path, monkeypatch):
+    class Updater:
+        def recover(self, instance, root):
+            instance.update(ready=True, install_state="ready", update_recovery_required=False)
+
+    window = LauncherWindow(data_root=tmp_path / "data", modrinth_updater=Updater())
+    window.instance_name_input.setText("Pack")
+    window._create_instance()
+    instance = window.state["instances"][0]
+    instance.update(provider="modrinth", ready=False, install_state="interrupted", update_recovery_required=True)
+    window.store.save(window.state)
+    journal = window.store.instance_root(instance["id"]) / "update-journal.json"
+    journal.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(window.store, "save", lambda _state: (_ for _ in ()).throw(RuntimeError("save failed")))
+    with pytest.raises(RuntimeError, match="save failed"):
+        window._recover_selected_modrinth_pack()
+    assert journal.exists()
+    monkeypatch.undo()
+    window.close()

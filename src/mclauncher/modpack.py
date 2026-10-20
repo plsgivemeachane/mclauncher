@@ -502,7 +502,6 @@ class ModrinthPackUpdater:
             journal_data = {}
         self._copy_tree(backup, root)
         self._durable_tree(root)
-        self._durable_unlink(journal)
         previous_instance = journal_data.get("previous_instance") if isinstance(journal_data, dict) else None
         if isinstance(previous_instance, dict):
             instance.clear()

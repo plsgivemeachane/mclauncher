@@ -1779,8 +1779,10 @@ class LauncherWindow(QMainWindow):
         self._set_session_controls_locked(True)
         try:
             updater = self._updater_for_provider(provider)
-            updater.recover(instance, self.store.instance_minecraft_root(instance["id"]))
+            instance_root = self.store.instance_minecraft_root(instance["id"])
+            updater.recover(instance, instance_root)
             self.store.save(self.state)
+            ModrinthPackUpdater._durable_unlink(instance_root.parent / "update-journal.json")
             self.instance_status_label.setText(f"Recovered: {instance['name']}")
             self.diagnostic_hint_label.setText("The previous Modrinth release and worlds were restored.")
         except (ModrinthPackUpdateError, OSError, RuntimeError) as error:
