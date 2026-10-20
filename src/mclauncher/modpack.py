@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import urllib.request
+import inspect
 from urllib.parse import urlparse
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -29,7 +30,7 @@ class UnsupportedModrinthPack(ModrinthPackError):
 
 Progress = Callable[[str, int, int], None]
 Download = Callable[[str], bytes]
-LoaderResolver = Callable[[str, str], object]
+LoaderResolver = Callable[..., object]
 
 _LOADER_NAMES = {
     "fabric-loader": "fabric",
@@ -140,24 +141,47 @@ class ModrinthPackImporter:
         if len(loaders) != 1:
             raise UnsupportedModrinthPack("The pack must declare exactly one supported client loader")
         loader, version = loaders[0]
-        if loader not in _LOADER_NAMES or not isinstance(version, str) or not version:
+        supported_loaders = {
+            "fabric-loader": "fabric",
+            "forge": "forge",
+            "neoforge": "neoforge",
+            "quilt-loader": "quilt",
+        }
+        loader_names = {"fabric-loader": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt-loader": "Quilt"}
+        if loader not in supported_loaders or not isinstance(version, str) or not version:
             raise UnsupportedModrinthPack(f"Modrinth loader {loader!r} is not supported yet")
-        loader_name = _LOADER_NAMES[loader]
-        resolver = self.loader_resolver or (
-            lambda selected_game, selected_loader: resolve_official_loader_profile(
-                loader_name, selected_game, selected_loader
+        if loader == "forge" and self.loader_resolver is None:
+            raise UnsupportedModrinthPack(
+                f"Forge {version} is not supported: cannot be verified from official metadata for Minecraft {game}"
             )
-        )
+        if loader == "neoforge" and self.loader_resolver is None:
+            raise UnsupportedModrinthPack(
+                f"{loader_names[loader]} {version} is unavailable for Minecraft {game}; exact support metadata is required"
+            )
+        resolver = self.loader_resolver
+        if resolver is None and loader in {"fabric-loader", "quilt-loader"}:
+            resolver = lambda selected_game, selected_loader: resolve_official_loader_profile(
+                supported_loaders[loader], selected_game, selected_loader
+            )
         if resolver is not None:
             try:
-                profile = resolver(game, version)
+                # Keep the pre-NeoForge two-argument injection seam working while
+                # allowing the resolver to distinguish loader families.
+                parameters = inspect.signature(resolver).parameters
+                positional = [p for p in parameters.values() if p.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD
+                )]
+                accepts_loader = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in parameters.values()) or len(positional) >= 3
+                profile = resolver(game, loader, version) if accepts_loader else resolver(game, version)
             except Exception as error:
+                name = loader_names[loader]
                 raise UnsupportedModrinthPack(
-                    f"{loader_name.title()} {version} is unavailable for Minecraft {game}: {error}"
+                    f"{name} {version} is unavailable for Minecraft {game}: {error}"
                 ) from error
             if profile is False or profile is None:
-                raise UnsupportedModrinthPack(f"{loader_name.title()} {version} is unavailable for Minecraft {game}")
-        return game, loader_name, version
+                name = loader_names[loader]
+                raise UnsupportedModrinthPack(f"{name} {version} is unavailable for Minecraft {game}")
+        return game, version, supported_loaders[loader]
 
     def import_archive(
         self,
@@ -177,7 +201,7 @@ class ModrinthPackImporter:
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 manifest = self._read_manifest(archive)
-                game, loader, loader_version = self._validate_loader(manifest)
+                game, loader_version, loader_id = self._validate_loader(manifest)
                 members = set(archive.namelist())
                 for name in members:
                     if name.endswith("/"):
@@ -227,7 +251,7 @@ class ModrinthPackImporter:
                 "provider": "modrinth",
                 "format": "mrpack",
                 "game_version": game,
-                "loader": loader,
+                "loader": loader_id,
                 "loader_version": loader_version,
                 "installed_files": sorted(set(installed)),
                 "manifest": manifest,
