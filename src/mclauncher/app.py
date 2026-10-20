@@ -37,6 +37,7 @@ from .persistence import LauncherStore
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .memory import default_memory_gib, validate_memory_gib
 from .lifecycle import GameProcessRegistry
+from .modpack import ModrinthPackError, ModrinthPackImporter, UnsupportedModrinthPack
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
@@ -101,13 +102,15 @@ LandscapePanel = MinecraftHomePanel
 
 
 class LauncherWindow(QMainWindow):
-    def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None) -> None:
+    def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
+                 modpack_importer=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
         self._installer_injected = installer is not None
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
+        self.modpack_importer = modpack_importer or ModrinthPackImporter()
         self.install_worker = None
         self.installing_instance = None
         self.discovery_worker = None
@@ -339,6 +342,10 @@ class LauncherWindow(QMainWindow):
         self.install_button.setObjectName("installButton")
         self.install_button.clicked.connect(self._install_selected_instance)
         legacy_layout.addWidget(self.install_button)
+        self.import_modpack_button = QPushButton("Import Modrinth .mrpack")
+        self.import_modpack_button.setObjectName("importModpackButton")
+        self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
+        legacy_layout.addWidget(self.import_modpack_button)
         self.content_stack.addWidget(legacy_panel)
         layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
@@ -848,6 +855,94 @@ class LauncherWindow(QMainWindow):
         self._add_instance_item(instance)
         self.instance_list.setCurrentRow(self.instance_list.count() - 1)
         self.instance_name_input.clear()
+
+    def _import_modrinth_pack(self) -> None:
+        """Import a pack through the approved window seam.
+
+        The importer stages and validates all archive content before publishing
+        it.  The injected vanilla installer then prepares Minecraft/runtime;
+        test fixtures can provide ``install_modpack`` for a complete loader
+        installation without changing the window boundary.
+        """
+        if self._session_controls_locked or self.install_worker is not None or self.store.recovery_required:
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import Modrinth modpack", "", "Modrinth packs (*.mrpack);;All files (*)"
+        )
+        if not filename:
+            return
+        archive = Path(filename)
+        name = archive.stem.strip() or "Imported Modrinth pack"
+        existing_names = {str(item.get("name")) for item in self.state.get("instances", [])}
+        base_name = name
+        suffix = 2
+        while name in existing_names:
+            name = f"{base_name} ({suffix})"
+            suffix += 1
+        instance = {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "version": None,
+            "ready": False,
+            "automatic": False,
+            "provider": "modrinth",
+            "pack_source": str(archive),
+            "install_state": "importing",
+            "install_error": "",
+        }
+        self.state["instances"].append(instance)
+        self.store.create_instance_root(instance["id"])
+        self.store.save(self.state)
+        self._add_instance_item(instance)
+        self.instance_list.setCurrentRow(self.instance_list.count() - 1)
+        try:
+            metadata = self.modpack_importer.import_archive(
+                archive,
+                self.store.instance_minecraft_root(instance["id"]),
+                on_progress=lambda status, current, maximum: self._show_import_progress(status, current, maximum),
+            )
+            instance.update(
+                version=metadata["game_version"],
+                loader=metadata["loader"],
+                loader_version=metadata["loader_version"],
+                installed_files=metadata["installed_files"],
+                pack_format=metadata["format"],
+                install_state="imported",
+                ready=False,
+                install_error="",
+            )
+            installer_method = getattr(self.installer, "install_modpack", None)
+            if not callable(installer_method):
+                raise UnsupportedModrinthPack("The configured installer cannot prepare Fabric packs")
+            installer_method(instance, self.store.instance_minecraft_root(instance["id"]), metadata, self._show_import_progress)
+            ready = bool(self.player.is_ready(instance, self.store.instance_minecraft_root(instance["id"])))
+            instance["ready"] = ready
+            instance["install_state"] = "ready" if ready else "incomplete"
+            if not ready:
+                instance["install_error"] = "Required Minecraft, Fabric, or runtime files are incomplete"
+            self.store.save(self.state)
+            self.instance_status_label.setText(
+                f"Ready: {instance['name']} ({instance['version']})" if ready
+                else f"Incomplete: {instance['name']} — retry preparation"
+            )
+            self.diagnostic_hint_label.setText("Imported Modrinth pack; Play is available." if ready else instance["install_error"])
+        except (ModrinthPackError, UnsupportedModrinthPack, OSError, RuntimeError) as error:
+            instance["ready"] = False
+            instance["install_state"] = "failed"
+            instance["install_error"] = str(error) or "Modrinth pack import failed"
+            self.store.save(self.state)
+            self.instance_status_label.setText(f"Import failed: {instance['install_error']}")
+            self.diagnostic_hint_label.setText("Choose a supported Fabric .mrpack and retry the import.")
+        finally:
+            self._refresh_install_button()
+            self._refresh_play_button()
+
+    def _show_import_progress(self, status: str, current: int, maximum: int) -> None:
+        if status:
+            self.instance_status_label.setText(status)
+        if maximum > 0:
+            self.install_progress.setRange(0, maximum)
+            self.install_progress.setValue(max(0, current))
 
     def _add_instance_item(self, instance: dict) -> None:
         item = QListWidgetItem(str(instance["name"]))

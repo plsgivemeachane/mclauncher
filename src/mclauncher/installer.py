@@ -77,6 +77,17 @@ class MinecraftInstaller:
         )
         self._validate_installation(version, minecraft_directory)
 
+    def install_modpack(self, instance: dict, minecraft_directory: Path, metadata: dict,
+                        on_progress: ProgressCallback) -> None:
+        """Prepare a supported modpack through an explicit installer boundary.
+
+        The base launcher ships the vanilla contract only.  A Fabric-aware
+        adapter must implement this method and install the loader profile and
+        managed runtime before the window can mark a pack ready.
+        """
+        del instance, minecraft_directory, metadata, on_progress
+        raise RuntimeError("Fabric modpack installation is unavailable in this launcher build")
+
     @staticmethod
     def _validate_installation(version: str, minecraft_directory: Path) -> None:
         version_root = minecraft_directory / "versions" / version
