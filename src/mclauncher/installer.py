@@ -78,15 +78,41 @@ class MinecraftInstaller:
         self._validate_installation(version, minecraft_directory)
 
     def install_modpack(self, instance: dict, minecraft_directory: Path, metadata: dict,
-                        on_progress: ProgressCallback) -> None:
+                        on_progress: ProgressCallback) -> str:
         """Prepare a supported modpack through an explicit installer boundary.
 
-        The base launcher ships the vanilla contract only.  A Fabric-aware
-        adapter must implement this method and install the loader profile and
-        managed runtime before the window can mark a pack ready.
+        Install the exact declared loader through minecraft-launcher-lib's
+        official per-game loader metadata.  The library rejects loader/game
+        pairs that its upstream metadata does not support.
         """
-        del instance, minecraft_directory, metadata, on_progress
-        raise RuntimeError("Fabric modpack installation is unavailable in this launcher build")
+        loader = metadata.get("loader")
+        game_version = metadata.get("game_version")
+        loader_version = metadata.get("loader_version")
+        if loader not in {"fabric", "quilt"}:
+            raise RuntimeError(f"Mod loader {loader!r} is not supported in this launcher build")
+        if not isinstance(game_version, str) or not isinstance(loader_version, str):
+            raise RuntimeError("The modpack loader metadata is incomplete")
+        try:
+            mod_loader = minecraft_launcher_lib.mod_loader.get_mod_loader(loader)
+            supported_versions = mod_loader.get_loader_versions(game_version, True)
+            if loader_version not in supported_versions:
+                raise RuntimeError(
+                    f"{loader.title()} {loader_version} is unavailable for Minecraft {game_version}"
+                )
+            installed_version = mod_loader.install(
+                game_version,
+                minecraft_directory,
+                loader_version=loader_version,
+                callback={
+                    "setStatus": lambda status: on_progress(status, -1, -1),
+                    "setProgress": lambda progress: on_progress("", progress, -1),
+                    "setMax": lambda maximum: on_progress("", -1, maximum),
+                },
+            )
+        except (AttributeError, ValueError) as error:
+            raise RuntimeError(f"{loader.title()} installation is unavailable: {error}") from error
+        instance["installed_version"] = installed_version
+        return installed_version
 
     @staticmethod
     def _validate_installation(version: str, minecraft_directory: Path) -> None:
@@ -114,13 +140,13 @@ class MinecraftPlayer:
         memory_gib: int | None = None,
     ):
         version = instance.get("version")
+        launch_version = instance.get("installed_version") or version
         if not version:
             raise RuntimeError("No Minecraft version is pinned; install the instance first")
         validate_version_id(version)
-        version_root = minecraft_directory / "versions" / version
         if not self.is_ready(instance, minecraft_directory):
             raise RuntimeError("Minecraft files are incomplete; install or retry before playing")
-        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(version, minecraft_directory)
+        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(launch_version, minecraft_directory)
         if not runtime_info or not runtime_info.get("name"):
             raise RuntimeError("The managed Java runtime is missing; install or retry before playing")
         executable = minecraft_launcher_lib.runtime.get_executable_path(runtime_info["name"], minecraft_directory)
@@ -140,21 +166,27 @@ class MinecraftPlayer:
         }
         if memory_gib is not None:
             options["jvmArguments"] = [f"-Xmx{memory_gib}G", f"-Xms{memory_gib}G"]
-        return minecraft_launcher_lib.command.get_minecraft_command(version, minecraft_directory, options), game_directory
+        return minecraft_launcher_lib.command.get_minecraft_command(launch_version, minecraft_directory, options), game_directory
 
     @staticmethod
     def is_ready(instance: dict, minecraft_directory: Path) -> bool:
         version = instance.get("version")
+        installed_version = instance.get("installed_version") or version
         if not version:
             return False
         try:
             validate_version_id(version)
+            validate_version_id(installed_version)
         except ValueError:
             return False
         version_root = minecraft_directory / "versions" / version
         if not (version_root / f"{version}.json").is_file() or not (version_root / f"{version}.jar").is_file():
             return False
-        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(version, minecraft_directory)
+        if installed_version != version:
+            loader_root = minecraft_directory / "versions" / installed_version
+            if not (loader_root / f"{installed_version}.json").is_file():
+                return False
+        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(installed_version, minecraft_directory)
         if not runtime_info or not runtime_info.get("name"):
             return False
         executable = minecraft_launcher_lib.runtime.get_executable_path(runtime_info["name"], minecraft_directory)

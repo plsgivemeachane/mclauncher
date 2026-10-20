@@ -56,3 +56,39 @@ def test_importer_rejects_unsupported_loader_and_traversal_before_writes(tmp_pat
             tmp_path / "escape.mrpack", tmp_path / "escape"
         )
     assert not (tmp_path / "outside.jar").exists()
+
+
+def test_importer_accepts_quilt_only_when_the_exact_game_pair_is_supported(tmp_path):
+    _pack(tmp_path / "quilt.mrpack", dependency="quilt-loader")
+    calls = []
+
+    def resolve(game, loader):
+        calls.append((game, loader))
+        return {"id": "quilt-loader-0.27.1-1.21.4", "inheritsFrom": game}
+
+    result = ModrinthPackImporter(
+        download=lambda _url: b"jar", loader_resolver=resolve
+    ).import_archive(tmp_path / "quilt.mrpack", tmp_path / "quilt")
+
+    assert result["loader"] == "quilt"
+    assert result["loader_version"] == "0.16.9"
+    assert calls == [("1.21.4", "0.16.9")]
+
+
+def test_importer_rejects_quilt_mixed_with_forge_or_neoforge(tmp_path):
+    path = tmp_path / "mixed.mrpack"
+    payload = b"jar"
+    hashes = {"sha1": hashlib.sha1(payload).hexdigest(), "sha512": hashlib.sha512(payload).hexdigest()}
+    manifest = {
+        "formatVersion": 1,
+        "game": "minecraft",
+        "dependencies": {
+            "minecraft": "1.21.4", "quilt-loader": "0.16.9", "forge": "51.0.0"
+        },
+        "files": [{"path": "mods/example.jar", "hashes": hashes, "downloads": ["https://cdn.modrinth.com/example.jar"]}],
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("modrinth.index.json", json.dumps(manifest))
+
+    with pytest.raises(UnsupportedModrinthPack, match="one.*loader|Forge"):
+        ModrinthPackImporter(download=lambda _url: payload).import_archive(path, tmp_path / "mixed")

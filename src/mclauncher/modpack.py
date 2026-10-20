@@ -31,6 +31,43 @@ Progress = Callable[[str, int, int], None]
 Download = Callable[[str], bytes]
 LoaderResolver = Callable[[str, str], object]
 
+_LOADER_NAMES = {
+    "fabric-loader": "fabric",
+    "quilt-loader": "quilt",
+}
+
+
+def resolve_official_loader_profile(loader: str, game_version: str, loader_version: str) -> dict:
+    """Return the upstream profile only when that exact game/loader pair exists."""
+    if loader not in {"fabric", "quilt"}:
+        raise UnsupportedModrinthPack(f"Loader {loader!r} has no supported profile metadata")
+    host = "meta.fabricmc.net" if loader == "fabric" else "meta.quiltmc.org"
+    prefix = "/v2" if loader == "fabric" else "/v3"
+    versions_url = f"https://{host}{prefix}/versions/loader/{game_version}"
+    profile_url = f"{versions_url}/{loader_version}/profile/json"
+    try:
+        with urllib.request.urlopen(versions_url, timeout=15) as response:
+            versions = json.loads(response.read().decode("utf-8"))
+        supported = {
+            item.get("loader", {}).get("version") or item.get("version")
+            for item in versions if isinstance(item, dict)
+        }
+        if loader_version not in supported:
+            raise UnsupportedModrinthPack(
+                f"{loader.title()} {loader_version} is unavailable for Minecraft {game_version}"
+            )
+        with urllib.request.urlopen(profile_url, timeout=15) as response:
+            profile = json.loads(response.read().decode("utf-8"))
+    except UnsupportedModrinthPack:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise UnsupportedModrinthPack(
+            f"Could not verify {loader.title()} {loader_version} for Minecraft {game_version}: {error}"
+        ) from error
+    if not isinstance(profile, dict) or not isinstance(profile.get("id"), str):
+        raise UnsupportedModrinthPack(f"{loader.title()} returned an invalid launcher profile")
+    return profile
+
 
 def _safe_relative_path(value: object, *, label: str) -> PurePosixPath:
     if not isinstance(value, str) or not value or "\\" in value:
@@ -94,7 +131,7 @@ class ModrinthPackImporter:
             raise ModrinthPackError("The Modrinth manifest is missing files or dependencies")
         return value
 
-    def _validate_loader(self, manifest: dict) -> tuple[str, str]:
+    def _validate_loader(self, manifest: dict) -> tuple[str, str, str]:
         dependencies = manifest["dependencies"]
         game = dependencies.get("minecraft")
         if not isinstance(game, str) or not game:
@@ -103,16 +140,24 @@ class ModrinthPackImporter:
         if len(loaders) != 1:
             raise UnsupportedModrinthPack("The pack must declare exactly one supported client loader")
         loader, version = loaders[0]
-        if loader != "fabric-loader" or not isinstance(version, str) or not version:
+        if loader not in _LOADER_NAMES or not isinstance(version, str) or not version:
             raise UnsupportedModrinthPack(f"Modrinth loader {loader!r} is not supported yet")
-        if self.loader_resolver is not None:
+        loader_name = _LOADER_NAMES[loader]
+        resolver = self.loader_resolver or (
+            lambda selected_game, selected_loader: resolve_official_loader_profile(
+                loader_name, selected_game, selected_loader
+            )
+        )
+        if resolver is not None:
             try:
-                profile = self.loader_resolver(game, version)
+                profile = resolver(game, version)
             except Exception as error:
-                raise UnsupportedModrinthPack(f"Fabric {version} is unavailable for Minecraft {game}: {error}") from error
+                raise UnsupportedModrinthPack(
+                    f"{loader_name.title()} {version} is unavailable for Minecraft {game}: {error}"
+                ) from error
             if profile is False or profile is None:
-                raise UnsupportedModrinthPack(f"Fabric {version} is unavailable for Minecraft {game}")
-        return game, version
+                raise UnsupportedModrinthPack(f"{loader_name.title()} {version} is unavailable for Minecraft {game}")
+        return game, loader_name, version
 
     def import_archive(
         self,
@@ -132,7 +177,7 @@ class ModrinthPackImporter:
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 manifest = self._read_manifest(archive)
-                game, loader = self._validate_loader(manifest)
+                game, loader, loader_version = self._validate_loader(manifest)
                 members = set(archive.namelist())
                 for name in members:
                     if name.endswith("/"):
@@ -182,8 +227,8 @@ class ModrinthPackImporter:
                 "provider": "modrinth",
                 "format": "mrpack",
                 "game_version": game,
-                "loader": "fabric",
-                "loader_version": loader,
+                "loader": loader,
+                "loader_version": loader_version,
                 "installed_files": sorted(set(installed)),
                 "manifest": manifest,
             }
