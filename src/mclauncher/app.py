@@ -41,6 +41,7 @@ from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .memory import default_memory_gib, validate_memory_gib
 from .lifecycle import GameProcessRegistry
 from .modpack import ModrinthPackError, ModrinthPackImporter, UnsupportedModrinthPack
+from .modrinth_catalog import ModrinthCatalog, ModrinthCatalogError, ModrinthRelease
 from .news import MinecraftNewsFeed
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
@@ -108,7 +109,7 @@ LandscapePanel = MinecraftHomePanel
 
 class LauncherWindow(QMainWindow):
     def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
-                 modpack_importer=None, news_provider=None) -> None:
+                 modpack_importer=None, news_provider=None, modrinth_catalog=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
@@ -116,6 +117,10 @@ class LauncherWindow(QMainWindow):
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
         self.modpack_importer = modpack_importer or ModrinthPackImporter(provider=self.installer)
+        self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
+        self._catalog_results = []
+        self._catalog_releases = []
+        self._catalog_installing = False
         self.install_worker = None
         self.installing_instance = None
         self.discovery_worker = None
@@ -176,8 +181,12 @@ class LauncherWindow(QMainWindow):
         self.instances_nav_button.setObjectName("instancesNavButton")
         self.home_nav_button.clicked.connect(lambda: self._show_page(0))
         self.instances_nav_button.clicked.connect(lambda: self._show_page(1))
+        self.browse_nav_button = QPushButton("Browse", navigation)
+        self.browse_nav_button.setObjectName("browseNavButton")
+        self.browse_nav_button.clicked.connect(lambda: self._show_page(2))
         navigation_layout.addWidget(self.home_nav_button)
         navigation_layout.addWidget(self.instances_nav_button)
+        navigation_layout.addWidget(self.browse_nav_button)
         navigation_layout.addStretch(1)
         layout.addWidget(navigation)
 
@@ -391,6 +400,47 @@ class LauncherWindow(QMainWindow):
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
         legacy_layout.addWidget(self.import_modpack_button)
         self.content_stack.addWidget(legacy_panel)
+
+        browse_panel = QWidget(root)
+        browse_layout = QVBoxLayout(browse_panel)
+        browse_layout.setContentsMargins(26, 20, 26, 20)
+        browse_layout.addWidget(QLabel("Modrinth modpacks"))
+        browse_search_row = QHBoxLayout()
+        self.modrinth_search_input = QLineEdit(browse_panel)
+        self.modrinth_search_input.setObjectName("modrinthSearchInput")
+        self.modrinth_search_input.setPlaceholderText("Search modpacks")
+        self.modrinth_search_button = QPushButton("Search", browse_panel)
+        self.modrinth_search_button.setObjectName("modrinthSearchButton")
+        self.modrinth_search_button.clicked.connect(self._search_modrinth_catalog)
+        browse_search_row.addWidget(self.modrinth_search_input, 1)
+        browse_search_row.addWidget(self.modrinth_search_button)
+        browse_layout.addLayout(browse_search_row)
+        browse_body = QHBoxLayout()
+        self.modrinth_pack_list = QListWidget(browse_panel)
+        self.modrinth_pack_list.setObjectName("modrinthPackList")
+        self.modrinth_pack_list.currentItemChanged.connect(self._select_modrinth_catalog_pack)
+        browse_body.addWidget(self.modrinth_pack_list, 1)
+        details = QVBoxLayout()
+        self.modrinth_pack_details = QLabel("Search Modrinth to see pack details.", browse_panel)
+        self.modrinth_pack_details.setObjectName("modrinthPackDetails")
+        self.modrinth_pack_details.setWordWrap(True)
+        details.addWidget(self.modrinth_pack_details)
+        self.modrinth_release_selector = QComboBox(browse_panel)
+        self.modrinth_release_selector.setObjectName("modrinthReleaseSelector")
+        details.addWidget(self.modrinth_release_selector)
+        self.modrinth_install_button = QPushButton("Install selected release", browse_panel)
+        self.modrinth_install_button.setObjectName("modrinthInstallButton")
+        self.modrinth_install_button.setEnabled(False)
+        self.modrinth_install_button.clicked.connect(self._install_modrinth_catalog_release)
+        details.addWidget(self.modrinth_install_button)
+        self.modrinth_catalog_status = QLabel("", browse_panel)
+        self.modrinth_catalog_status.setObjectName("modrinthCatalogStatus")
+        self.modrinth_catalog_status.setWordWrap(True)
+        details.addWidget(self.modrinth_catalog_status)
+        details.addStretch(1)
+        browse_body.addLayout(details, 1)
+        browse_layout.addLayout(browse_body, 1)
+        self.content_stack.addWidget(browse_panel)
         layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
         self._apply_compact_theme()
@@ -403,7 +453,7 @@ class LauncherWindow(QMainWindow):
             QWidget { background: #161b19; color: #eef3e9; }
             QFrame#titleBar { background: #172019; }
             QFrame#navigationBar { background: #172019; }
-            QPushButton#homeNavButton[active="true"], QPushButton#instancesNavButton[active="true"] { background: #2c3d30; color: #e6f4dc; }
+            QPushButton#homeNavButton[active="true"], QPushButton#instancesNavButton[active="true"], QPushButton#browseNavButton[active="true"] { background: #2c3d30; color: #e6f4dc; }
             QLabel#brandLabel { color: #c5cfc7; font-size: 15px; font-weight: 650; }
             QFrame#launchBar { background: #1b231e; }
             QLabel#usernameFieldLabel, QLabel#setupFieldLabel { color: #a7b3a9; font-size: 11px; }
@@ -432,15 +482,17 @@ class LauncherWindow(QMainWindow):
         self.username_warning.setStyleSheet("color: #e7c17a;")
         self.confirm_username_change_button.hide()
         self.home_nav_button.setProperty("active", True)
+        self.browse_nav_button.setProperty("active", False)
 
     def _show_page(self, index: int) -> None:
         if self.content_stack is None:
             return
-        index = 0 if index not in (0, 1) else index
+        index = 0 if index not in (0, 1, 2) else index
         self.content_stack.setCurrentIndex(index)
         self.home_nav_button.setProperty("active", index == 0)
         self.instances_nav_button.setProperty("active", index == 1)
-        for button in (self.home_nav_button, self.instances_nav_button):
+        self.browse_nav_button.setProperty("active", index == 2)
+        for button in (self.home_nav_button, self.instances_nav_button, self.browse_nav_button):
             button.style().unpolish(button)
             button.style().polish(button)
 
@@ -963,6 +1015,82 @@ class LauncherWindow(QMainWindow):
         self.instance_list.setCurrentRow(self.instance_list.count() - 1)
         self.instance_name_input.clear()
 
+    def _search_modrinth_catalog(self) -> None:
+        query = self.modrinth_search_input.text().strip()
+        if not query:
+            self.modrinth_catalog_status.setText("Enter a search term to browse Modrinth modpacks.")
+            return
+        try:
+            results = self.modrinth_catalog.search(query)
+        except (ModrinthCatalogError, OSError, RuntimeError) as error:
+            self._catalog_results = []
+            self.modrinth_pack_list.clear()
+            self.modrinth_catalog_status.setText(f"Modrinth search failed: {error}")
+            return
+        self._catalog_results = results
+        self.modrinth_pack_list.clear()
+        for result in results:
+            title = str(result.get("title") or result.get("name") or result.get("slug") or result.get("project_id"))
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, result)
+            item.setToolTip(str(result.get("description", "")))
+            self.modrinth_pack_list.addItem(item)
+        self.modrinth_catalog_status.setText(f"{len(results)} Modrinth pack(s) found." if results else "No Modrinth modpacks matched that search.")
+
+    def _select_modrinth_catalog_pack(self, current, _previous=None) -> None:
+        self.modrinth_release_selector.clear()
+        self._catalog_releases = []
+        self.modrinth_install_button.setEnabled(False)
+        if current is None:
+            return
+        result = current.data(Qt.ItemDataRole.UserRole) or {}
+        project_id = str(result.get("project_id") or result.get("id") or "")
+        if not project_id:
+            return
+        try:
+            details = self.modrinth_catalog.project(project_id)
+            releases = self.modrinth_catalog.releases(project_id)
+        except (ModrinthCatalogError, OSError, RuntimeError) as error:
+            self.modrinth_pack_details.setText(f"Could not load pack details: {error}")
+            self.modrinth_catalog_status.setText("Choose another pack or retry the search.")
+            return
+        description = str(details.get("description") or "No description available.")
+        self.modrinth_pack_details.setText(f"{details.get('title', project_id)}\n\n{description}")
+        self._catalog_releases = releases
+        for release in releases:
+            self.modrinth_release_selector.addItem(
+                f"{release.version_number or release.name} · {', '.join(release.game_versions)}",
+                release,
+            )
+        self.modrinth_install_button.setEnabled(bool(releases))
+        self.modrinth_catalog_status.setText(f"{len(releases)} release(s) available.")
+
+    def _install_modrinth_catalog_release(self) -> None:
+        if self._catalog_installing or self._session_controls_locked or self.install_worker is not None:
+            return
+        release = self.modrinth_release_selector.currentData(Qt.ItemDataRole.UserRole)
+        if not isinstance(release, ModrinthRelease):
+            self.modrinth_catalog_status.setText("Select a release before installing.")
+            return
+        project = self.modrinth_pack_list.currentItem()
+        project_data = project.data(Qt.ItemDataRole.UserRole) if project else {}
+        title = str((project_data or {}).get("title") or (project_data or {}).get("slug") or release.project_id)
+        self._catalog_installing = True
+        self.modrinth_install_button.setEnabled(False)
+        archive = self.store.root / f".modrinth-catalog-{release.id}.mrpack"
+        try:
+            archive.write_bytes(self.modrinth_catalog.download_release(release))
+            self._install_modrinth_archive(
+                archive, title, pack_release_id=release.id, pack_project_id=release.project_id,
+            )
+            self.modrinth_catalog_status.setText(f"Installed {title} {release.version_number or release.name}.")
+        except (ModrinthCatalogError, ModrinthPackError, UnsupportedModrinthPack, OSError, RuntimeError) as error:
+            self.modrinth_catalog_status.setText(f"Modrinth installation failed: {error}")
+        finally:
+            archive.unlink(missing_ok=True)
+            self._catalog_installing = False
+            self.modrinth_install_button.setEnabled(bool(self._catalog_releases))
+
     def _import_modrinth_pack(self) -> None:
         """Import and prepare a Modrinth pack through injected collaborators."""
         if self._session_controls_locked or self.install_worker is not None or self.store.recovery_required:
@@ -974,6 +1102,10 @@ class LauncherWindow(QMainWindow):
             return
         archive = Path(filename)
         name = archive.stem.strip() or "Imported Modrinth pack"
+        self._install_modrinth_archive(archive, name)
+
+    def _install_modrinth_archive(self, archive: Path, name: str, *, pack_release_id: str = "",
+                                  pack_project_id: str = "") -> None:
         existing_names = {str(item.get("name")) for item in self.state.get("instances", [])}
         base_name = name
         suffix = 2
@@ -985,6 +1117,10 @@ class LauncherWindow(QMainWindow):
             "automatic": False, "provider": "modrinth", "pack_source": str(archive),
             "install_state": "importing", "install_error": "",
         }
+        if pack_release_id:
+            instance["pack_release_id"] = pack_release_id
+        if pack_project_id:
+            instance["pack_project_id"] = pack_project_id
         self.state["instances"].append(instance)
         self.store.create_instance_root(instance["id"])
         self.store.save(self.state)
