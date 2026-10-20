@@ -121,7 +121,8 @@ LandscapePanel = MinecraftHomePanel
 class LauncherWindow(QMainWindow):
     def __init__(self, data_root: Path | str | None = None, installer=None, player=None, game_registry=None,
                  modpack_importer=None, news_provider=None, modrinth_catalog=None, optifine_installer=None,
-                 curseforge_importer=None, mod_installer=None, modrinth_updater=None) -> None:
+                 curseforge_importer=None, mod_installer=None, modrinth_updater=None,
+                 curseforge_updater=None) -> None:
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
@@ -134,6 +135,7 @@ class LauncherWindow(QMainWindow):
         self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
             loader_resolver=getattr(self.installer, "resolve_loader", None)
         )
+        self.curseforge_updater = curseforge_updater or ModrinthPackUpdater(self.curseforge_importer)
         self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
         self.mod_installer = mod_installer or ModrinthModInstaller(self.modrinth_catalog)
         self._catalog_results = []
@@ -421,7 +423,7 @@ class LauncherWindow(QMainWindow):
         self.import_modpack_button.setObjectName("importModpackButton")
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
         legacy_layout.addWidget(self.import_modpack_button)
-        self.update_modpack_button = QPushButton("Update selected Modrinth pack")
+        self.update_modpack_button = QPushButton("Update selected pack")
         self.update_modpack_button.setObjectName("updateModpackButton")
         self.update_modpack_button.clicked.connect(self._update_selected_modrinth_pack)
         legacy_layout.addWidget(self.update_modpack_button)
@@ -1356,16 +1358,18 @@ class LauncherWindow(QMainWindow):
             self._refresh_install_button()
             self._refresh_play_button()
 
-    def _update_selected_modrinth_pack(self) -> None:
-        """Explicitly replace a Modrinth instance from a selected archive."""
+    def _update_selected_pack(self) -> None:
+        """Explicitly replace a Modrinth or CurseForge instance from an archive."""
         instance = self._selected_instance()
-        if instance is None or instance.get("provider") != "modrinth":
-            self.diagnostic_hint_label.setText("Select an installed Modrinth pack before updating.")
+        provider = instance.get("provider") if instance else None
+        if provider not in {"modrinth", "curseforge"}:
+            self.diagnostic_hint_label.setText("Select an installed Modrinth or CurseForge pack before updating.")
             return
         if self._mutation_blocked(instance) or self._session_controls_locked or self.install_worker is not None:
             return
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Update Modrinth pack", "", "Modrinth packs (*.mrpack);;All files (*)"
+            self, "Update imported pack", "",
+            "Modrinth packs (*.mrpack);;CurseForge packs (*.zip);;All files (*)"
         )
         if not filename:
             return
@@ -1374,7 +1378,8 @@ class LauncherWindow(QMainWindow):
         instance["install_error"] = ""
         self.store.save(self.state)
         try:
-            result = self.modrinth_updater.update(
+            updater = self.modrinth_updater if provider == "modrinth" else self.curseforge_updater
+            result = updater.update(
                 instance, self.store.instance_minecraft_root(instance["id"]), Path(filename),
                 release_id=str(instance.get("pending_pack_release_id", "")),
                 on_progress=self._show_import_progress,
@@ -1403,15 +1408,23 @@ class LauncherWindow(QMainWindow):
             self._set_session_controls_locked(False)
             self._refresh_play_button()
 
+    def _update_selected_modrinth_pack(self) -> None:
+        self._update_selected_pack()
+
+    def _update_selected_curseforge_pack(self) -> None:
+        self._update_selected_pack()
+
     def _recover_selected_modrinth_pack(self) -> None:
         instance = self._selected_instance()
-        if instance is None or instance.get("provider") != "modrinth":
+        provider = instance.get("provider") if instance else None
+        if provider not in {"modrinth", "curseforge"}:
             return
         if self._mutation_blocked(instance) or self._session_controls_locked:
             return
         self._set_session_controls_locked(True)
         try:
-            self.modrinth_updater.recover(instance, self.store.instance_minecraft_root(instance["id"]))
+            updater = self.modrinth_updater if provider == "modrinth" else self.curseforge_updater
+            updater.recover(instance, self.store.instance_minecraft_root(instance["id"]))
             self.store.save(self.state)
             self.instance_status_label.setText(f"Recovered: {instance['name']}")
             self.diagnostic_hint_label.setText("The previous Modrinth release and worlds were restored.")
@@ -1422,6 +1435,9 @@ class LauncherWindow(QMainWindow):
         finally:
             self._set_session_controls_locked(False)
             self._refresh_play_button()
+
+    def _recover_selected_curseforge_pack(self) -> None:
+        self._recover_selected_modrinth_pack()
 
     def _show_import_progress(self, status: str, current: int, maximum: int) -> None:
         if status:
