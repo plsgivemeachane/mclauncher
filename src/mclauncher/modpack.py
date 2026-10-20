@@ -40,6 +40,43 @@ Progress = Callable[[str, int, int], None]
 Download = Callable[[str], bytes]
 LoaderResolver = Callable[..., object]
 
+_LOADER_NAMES = {
+    "fabric-loader": "fabric",
+    "quilt-loader": "quilt",
+}
+
+
+def resolve_official_loader_profile(loader: str, game_version: str, loader_version: str) -> dict:
+    """Return the upstream profile only when that exact game/loader pair exists."""
+    if loader not in {"fabric", "quilt"}:
+        raise UnsupportedModrinthPack(f"Loader {loader!r} has no supported profile metadata")
+    host = "meta.fabricmc.net" if loader == "fabric" else "meta.quiltmc.org"
+    prefix = "/v2" if loader == "fabric" else "/v3"
+    versions_url = f"https://{host}{prefix}/versions/loader/{game_version}"
+    profile_url = f"{versions_url}/{loader_version}/profile/json"
+    try:
+        with urllib.request.urlopen(versions_url, timeout=15) as response:
+            versions = json.loads(response.read().decode("utf-8"))
+        supported = {
+            item.get("loader", {}).get("version") or item.get("version")
+            for item in versions if isinstance(item, dict)
+        }
+        if loader_version not in supported:
+            raise UnsupportedModrinthPack(
+                f"{loader.title()} {loader_version} is unavailable for Minecraft {game_version}"
+            )
+        with urllib.request.urlopen(profile_url, timeout=15) as response:
+            profile = json.loads(response.read().decode("utf-8"))
+    except UnsupportedModrinthPack:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise UnsupportedModrinthPack(
+            f"Could not verify {loader.title()} {loader_version} for Minecraft {game_version}: {error}"
+        ) from error
+    if not isinstance(profile, dict) or not isinstance(profile.get("id"), str):
+        raise UnsupportedModrinthPack(f"{loader.title()} returned an invalid launcher profile")
+    return profile
+
 
 def _safe_relative_path(value: object, *, label: str) -> PurePosixPath:
     if not isinstance(value, str) or not value or "\\" in value:
@@ -116,8 +153,9 @@ class ModrinthPackImporter:
             "fabric-loader": "fabric",
             "forge": "forge",
             "neoforge": "neoforge",
+            "quilt-loader": "quilt",
         }
-        loader_names = {"fabric-loader": "Fabric", "forge": "Forge", "neoforge": "NeoForge"}
+        loader_names = {"fabric-loader": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt-loader": "Quilt"}
         if loader not in supported_loaders or not isinstance(version, str) or not version:
             raise UnsupportedModrinthPack(f"Modrinth loader {loader!r} is not supported yet")
         if loader == "forge" and self.loader_resolver is None:
@@ -128,16 +166,21 @@ class ModrinthPackImporter:
             raise UnsupportedModrinthPack(
                 f"{loader_names[loader]} {version} is unavailable for Minecraft {game}; exact support metadata is required"
             )
-        if self.loader_resolver is not None:
+        resolver = self.loader_resolver
+        if resolver is None and loader in {"fabric-loader", "quilt-loader"}:
+            resolver = lambda selected_game, selected_loader: resolve_official_loader_profile(
+                supported_loaders[loader], selected_game, selected_loader
+            )
+        if resolver is not None:
             try:
                 # Keep the pre-NeoForge two-argument injection seam working while
                 # allowing the resolver to distinguish loader families.
-                parameters = inspect.signature(self.loader_resolver).parameters
+                parameters = inspect.signature(resolver).parameters
                 positional = [p for p in parameters.values() if p.kind in (
                     inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD
                 )]
                 accepts_loader = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in parameters.values()) or len(positional) >= 3
-                profile = self.loader_resolver(game, loader, version) if accepts_loader else self.loader_resolver(game, version)
+                profile = resolver(game, loader, version) if accepts_loader else resolver(game, version)
             except Exception as error:
                 name = loader_names[loader]
                 raise UnsupportedModrinthPack(
