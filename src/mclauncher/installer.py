@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 import minecraft_launcher_lib
+from minecraft_launcher_lib import mod_loader
 from PySide6.QtCore import QObject, QTimer
 
 from . import __version__
@@ -79,52 +80,76 @@ class MinecraftInstaller:
 
     def install_modpack(self, instance: dict, minecraft_directory: Path, metadata: dict,
                         on_progress: ProgressCallback) -> None:
-        """Prepare a supported modpack through an explicit installer boundary.
-
-        Forge is installed through minecraft-launcher-lib's official loader
-        adapter.  The declared loader version is checked against the exact
-        Minecraft version before any loader installation is attempted.
-        """
+        """Install the exact declared loader through launcher-lib's official adapter."""
         loader = metadata.get("loader")
         game = metadata.get("game_version")
         loader_version = metadata.get("loader_version")
-        if loader != "forge":
-            raise RuntimeError(f"{str(loader).capitalize() if loader else 'Unknown'} modpack installation is unavailable in this launcher build")
+        loader_id = {
+            "fabric": "fabric",
+            "fabric-loader": "fabric",
+            "forge": "forge",
+            "neoforge": "neoforge",
+        }.get(loader)
+        if loader_id is None:
+            raise RuntimeError(f"{loader or 'Unknown'} modpack installation is unavailable in this launcher build")
         if not isinstance(game, str) or not game or not isinstance(loader_version, str) or not loader_version:
-            raise RuntimeError("Forge pack is missing its exact Minecraft or Forge version")
-        try:
-            forge = minecraft_launcher_lib.mod_loader.get_mod_loader("forge")
-            supported = forge.get_loader_versions(game, False)
-        except Exception as error:
-            raise RuntimeError(f"Could not verify Forge {loader_version} for Minecraft {game}: {error}") from error
-        if loader_version not in supported:
-            raise RuntimeError(f"Forge {loader_version} is unavailable for Minecraft {game}; choose the declared supported release")
+            display = loader.title() if isinstance(loader, str) else "Modpack"
+            raise RuntimeError(f"{display} metadata is incomplete")
+        support = self.resolve_loader(game, loader_id, loader_version)
+        if support is None:
+            display = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge"}[loader_id]
+            raise RuntimeError(f"{display} {loader_version} is unavailable for Minecraft {game}")
 
-        def set_status(status: str) -> None:
+        def callback_status(status: str) -> None:
             on_progress(status, -1, -1)
 
-        def set_progress(progress: int) -> None:
+        def callback_progress(progress: int) -> None:
             on_progress("", progress, -1)
 
-        def set_maximum(maximum: int) -> None:
+        def callback_maximum(maximum: int) -> None:
             on_progress("", -1, maximum)
 
+        adapter = mod_loader.get_mod_loader(loader_id)
         try:
-            installed_version = forge.install(
+            installed_version = adapter.install(
                 game,
                 minecraft_directory,
                 loader_version=loader_version,
-                callback={"setStatus": set_status, "setProgress": set_progress, "setMax": set_maximum},
+                callback={"setStatus": callback_status, "setProgress": callback_progress, "setMax": callback_maximum},
             )
         except Exception as error:
-            raise RuntimeError(f"Forge {loader_version} installation failed for Minecraft {game}: {error}") from error
+            display = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge"}[loader_id]
+            raise RuntimeError(f"{display} {loader_version} installation failed for Minecraft {game}: {error}") from error
         if not isinstance(installed_version, str) or not installed_version:
-            raise RuntimeError(f"Forge {loader_version} did not produce an installed launcher profile")
+            display = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge"}[loader_id]
+            raise RuntimeError(f"{display} {loader_version} installer did not report an installed version")
         instance["minecraft_version"] = game
-        instance["version"] = installed_version
-        runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(installed_version, minecraft_directory)
-        if not runtime_info or not runtime_info.get("name"):
-            raise RuntimeError(f"Forge {loader_version} installed without a managed Java runtime")
+        if loader_id == "forge":
+            # Forge's installer reports a profile while its generated files are
+            # validated by the managed runtime check used by its adapter.
+            instance["version"] = installed_version
+            runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(
+                installed_version, minecraft_directory
+            )
+            if not runtime_info or not runtime_info.get("name"):
+                raise RuntimeError(f"Forge {loader_version} installed without a managed Java runtime")
+        else:
+            instance["launch_version"] = installed_version
+            self._validate_installation(installed_version, minecraft_directory)
+
+    def resolve_loader(self, game: str, loader: str, version: str | None = None) -> dict | None:
+        """Return support only when launcher-lib reports this exact pair."""
+        if loader not in {"fabric", "fabric-loader", "forge", "neoforge"} or not isinstance(game, str) or not isinstance(version, str) or not version:
+            return None
+        loader_id = "fabric" if loader == "fabric-loader" else loader
+        try:
+            adapter = mod_loader.get_mod_loader(loader_id)
+            versions = adapter.get_loader_versions(game, False)
+        except Exception:
+            return None
+        if version not in versions:
+            return None
+        return {"loader": loader_id, "game_version": game, "loader_version": version}
 
     @staticmethod
     def _validate_installation(version: str, minecraft_directory: Path) -> None:
@@ -151,7 +176,7 @@ class MinecraftPlayer:
         player_uuid: str,
         memory_gib: int | None = None,
     ):
-        version = instance.get("version")
+        version = instance.get("launch_version") or instance.get("version")
         if not version:
             raise RuntimeError("No Minecraft version is pinned; install the instance first")
         validate_version_id(version)
@@ -182,7 +207,7 @@ class MinecraftPlayer:
 
     @staticmethod
     def is_ready(instance: dict, minecraft_directory: Path) -> bool:
-        version = instance.get("version")
+        version = instance.get("launch_version") or instance.get("version")
         if not version:
             return False
         try:
