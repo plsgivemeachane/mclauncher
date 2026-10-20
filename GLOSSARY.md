@@ -20,6 +20,14 @@ _Avoid_: Unmodded modpack
 A separate playable Minecraft setup with its own game version, worlds, settings, and screenshots.
 _Avoid_: Account, session
 
+**Modpack**:
+A collection of Minecraft mods and configuration intended to be played together. Each installed modpack has its own instance.
+_Avoid_: Mod, game version
+
+**Mod loader**:
+The software a modded Minecraft instance requires to load compatible mods, such as Fabric, Forge, NeoForge, or Quilt.
+_Avoid_: Modpack, launcher
+
 **Managed Java runtime**:
 A Java runtime downloaded and maintained by the launcher for running Minecraft.
 _Avoid_: System Java
