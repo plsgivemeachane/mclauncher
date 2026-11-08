@@ -133,4 +133,4 @@ def test_player_passes_memory_as_separate_jvm_arguments(tmp_path, monkeypatch):
         {"version": version}, minecraft_directory, "Alex", "uuid", memory_gib=4
     )
 
-    assert captured["options"]["jvmArguments"] == ["-Xmx4G", "-Xms4G"]
+    assert captured["options"]["jvmArguments"][:2] == ["-Xmx4G", "-Xms4G"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import json
 import threading
 from urllib.request import urlopen
@@ -25,6 +26,22 @@ def validate_version_id(version: str) -> str:
 
 
 ProgressCallback = Callable[[str, int, int], None]
+
+OFFLINE_SESSION_AGENT = "offline-session-agent.jar"
+
+
+def offline_session_agent_path() -> Path | None:
+    """Find the bundled agent that lets offline sessions join authenticating servers."""
+    executable = Path(sys.executable)
+    candidates = [
+        executable.resolve().parent / "assets" / OFFLINE_SESSION_AGENT,
+        executable.parent / "assets" / OFFLINE_SESSION_AGENT,
+        Path(__file__).with_name("assets") / OFFLINE_SESSION_AGENT,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 class MinecraftInstaller:
@@ -216,8 +233,14 @@ class MinecraftPlayer:
             "launcherName": "mclauncher",
             "launcherVersion": __version__,
         }
+        jvm_arguments = []
         if memory_gib is not None:
-            options["jvmArguments"] = [f"-Xmx{memory_gib}G", f"-Xms{memory_gib}G"]
+            jvm_arguments += [f"-Xmx{memory_gib}G", f"-Xms{memory_gib}G"]
+        agent = offline_session_agent_path()
+        if agent is not None:
+            jvm_arguments.append(f"-javaagent:{agent}")
+        if jvm_arguments:
+            options["jvmArguments"] = jvm_arguments
         return minecraft_launcher_lib.command.get_minecraft_command(launch_version, minecraft_directory, options), game_directory
 
     @staticmethod

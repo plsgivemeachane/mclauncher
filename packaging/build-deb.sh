@@ -74,6 +74,7 @@ fi
 # explicitly for the frozen Debian application.
 mkdir -p "$BUILD/frozen/assets"
 cp "$ROOT/src/mclauncher/assets/minecraft-home.png" "$BUILD/frozen/assets/minecraft-home.png"
+cp "$ROOT/src/mclauncher/assets/offline-session-agent.jar" "$BUILD/frozen/assets/offline-session-agent.jar"
 
 BIN=$(find "$BUILD/frozen" -maxdepth 2 -type f -perm -111 \
   \( -name 'mclauncher' -o -name 'mclauncher.bin' \) -print -quit)
