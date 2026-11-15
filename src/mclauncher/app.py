@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import shutil
@@ -34,6 +33,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QMessageBox,
     QStackedWidget,
+    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -56,8 +57,8 @@ from .modrinth_catalog import ModrinthCatalog, ModrinthCatalogError, ModrinthRel
 from .modrinth_mods import ModrinthModInstallError, ModrinthModInstaller
 from .optifine import OptiFineError, OptiFineInstaller
 from .localmods import copy_mod_to_instance, inspect_mod_jar
+from .identity import USERNAME_RE, local_identity
 
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
 _ACTIVE_INSTALL_WORKERS: set[QThread] = set()
 
@@ -65,12 +66,6 @@ _ACTIVE_INSTALL_WORKERS: set[QThread] = set()
 def _release_discovery_worker(worker: QThread) -> None:
     _ACTIVE_DISCOVERY_WORKERS.discard(worker)
     worker.deleteLater()
-
-
-def local_identity(username: str) -> str:
-    """Return the stable offline-session identity for a saved username."""
-    digest = hashlib.sha256(username.encode("utf-8")).hexdigest()
-    return str(uuid.UUID(digest[:32]))
 
 
 class MinecraftHomePanel(QFrame):
@@ -233,6 +228,7 @@ class LauncherWindow(QMainWindow):
         layout.addWidget(navigation)
 
         self.content_stack = QStackedWidget(root)
+        self.content_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.home_panel = QWidget(root)
         home_layout = QVBoxLayout(self.home_panel)
         home_layout.setContentsMargins(0, 0, 0, 0)
@@ -265,12 +261,14 @@ class LauncherWindow(QMainWindow):
         launch_layout.addWidget(self.install_progress)
 
         controls = QGridLayout()
-        controls.setHorizontalSpacing(15)
+        controls.setHorizontalSpacing(12)
         controls.setVerticalSpacing(5)
         username_label = QLabel("Username", launch_bar)
         username_label.setObjectName("usernameFieldLabel")
+        self.username_field_label = username_label
         setup_label = QLabel("Saved setup", launch_bar)
         setup_label.setObjectName("setupFieldLabel")
+        self.setup_field_label = setup_label
         controls.addWidget(username_label, 0, 0)
         controls.addWidget(setup_label, 0, 1)
         self.username_input = QLineEdit()
@@ -282,6 +280,7 @@ class LauncherWindow(QMainWindow):
         self.setup_selector = QComboBox(launch_bar)
         self.setup_selector.setObjectName("setupSelector")
         self.setup_selector.setMinimumHeight(47)
+        self.setup_selector.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setup_selector.currentIndexChanged.connect(self._select_setup_from_selector)
         controls.addWidget(self.setup_selector, 1, 1)
         self.play_button = QPushButton("▶  Play", launch_bar)
@@ -289,7 +288,15 @@ class LauncherWindow(QMainWindow):
         self.play_button.setMinimumHeight(47)
         self.play_button.clicked.connect(self._play_selected_instance)
         self.play_button.setEnabled(False)
-        controls.addWidget(self.play_button, 1, 2)
+        self.play_button.setMinimumWidth(120)
+        self.open_folder_button = QPushButton("Open Folder", launch_bar)
+        self.open_folder_button.setObjectName("openFolderButton")
+        self.open_folder_button.setMinimumSize(120, 47)
+        self.open_folder_button.setToolTip("Open the selected instance’s Minecraft folder: screenshots, saves, mods and more")
+        self.open_folder_button.clicked.connect(self._open_selected_instance_folder)
+        self.open_folder_button.setEnabled(False)
+        controls.addWidget(self.open_folder_button, 1, 2)
+        controls.addWidget(self.play_button, 1, 3)
         controls.setColumnStretch(0, 1)
         controls.setColumnStretch(1, 1)
         controls.setColumnStretch(2, 0)
@@ -306,14 +313,60 @@ class LauncherWindow(QMainWindow):
         self.selector_empty_label.setText("No matching versions or saved setups")
         self.selector_empty_label.hide()
         launch_layout.addWidget(self.selector_empty_label)
-        home_layout.addWidget(launch_bar)
+        # Shared launch controls stay available on every page.
         self.content_stack.addWidget(self.home_panel)
 
         legacy_panel = QWidget(root)
         legacy_layout = QVBoxLayout(legacy_panel)
-        legacy_layout.setContentsMargins(0, 0, 0, 0)
+        legacy_layout.setContentsMargins(24, 16, 24, 16)
+        legacy_layout.setSpacing(12)
         self.instances_panel = legacy_panel
+        heading = QLabel("Instances", legacy_panel)
+        heading.setObjectName("instancesHeading")
+        legacy_layout.addWidget(heading)
+        instance_body = QHBoxLayout()
+        instance_body.setSpacing(20)
+        library_scroll = QScrollArea(legacy_panel)
+        library_scroll.setObjectName("instanceLibraryScroll")
+        library_scroll.setWidgetResizable(True)
+        library_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        library_panel = QWidget()
+        library_panel.setMinimumHeight(220)
+        library = QVBoxLayout(library_panel)
+        library.setContentsMargins(0, 0, 8, 0)
+        library.setSpacing(8)
+        library_scroll.setWidget(library_panel)
+        instance_body.addWidget(library_scroll, 1)
+        tools_scroll = QScrollArea(legacy_panel)
+        tools_scroll.setObjectName("instanceToolsScroll")
+        tools_scroll.setWidgetResizable(True)
+        tools_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        tools_scroll.setMinimumWidth(300)
+        tools_panel = QWidget()
+        tools = QVBoxLayout(tools_panel)
+        tools.setContentsMargins(0, 0, 8, 0)
+        tools.setSpacing(12)
+        tools_scroll.setWidget(tools_panel)
+        instance_body.addWidget(tools_scroll, 1)
+        legacy_layout.addLayout(instance_body, 1)
+        self.selected_instance_heading = QLabel("Select an instance")
+        self.selected_instance_heading.setObjectName("selectedInstanceHeading")
+        self.selected_instance_heading.setWordWrap(True)
+        tools.addWidget(self.selected_instance_heading)
+        self.selected_instance_description = QLabel("Choose a saved setup on the left, or create a new one.")
+        self.selected_instance_description.setObjectName("selectedInstanceDescription")
+        self.selected_instance_description.setWordWrap(True)
+        tools.addWidget(self.selected_instance_description)
+        self.open_screenshots_button = QPushButton("Open Screenshots")
+        self.open_screenshots_button.setObjectName("openScreenshotsButton")
+        self.open_screenshots_button.clicked.connect(self._open_instance_screenshots)
+        self.open_screenshots_button.setEnabled(False)
+        tools.addWidget(self.open_screenshots_button)
 
+        # Retain the settings controls for existing handlers without orphan form labels.
+        hidden_settings = QWidget(legacy_panel)
+        hidden_settings.hide()
+        hidden_settings_layout = QVBoxLayout(hidden_settings)
         identity_form = QFormLayout()
         self.save_username_button = QPushButton("Save username")
         self.save_username_button.setObjectName("saveUsernameButton")
@@ -325,7 +378,7 @@ class LauncherWindow(QMainWindow):
         self.identity_label.setObjectName("identityLabel")
         self.identity_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         identity_form.addRow("", self.identity_label)
-        legacy_layout.addLayout(identity_form)
+        hidden_settings_layout.addLayout(identity_form)
 
         memory_form = QFormLayout()
         self.memory_input = QLineEdit()
@@ -344,7 +397,7 @@ class LauncherWindow(QMainWindow):
         self.memory_setting_error.setWordWrap(True)
         self.memory_setting_error.hide()
         memory_form.addRow("", self.memory_setting_error)
-        legacy_layout.addLayout(memory_form)
+        hidden_settings_layout.addLayout(memory_form)
 
         self.state_recovery_label = QLabel()
         self.state_recovery_label.setObjectName("stateRecoveryLabel")
@@ -368,77 +421,85 @@ class LauncherWindow(QMainWindow):
         self.confirm_username_change_button.clicked.connect(self._confirm_username_change)
         self.confirm_username_change_button.hide()
         launch_layout.insertWidget(1, self.username_warning)
-        legacy_layout.addWidget(self.confirm_username_change_button)
+        launch_layout.insertWidget(2, self.confirm_username_change_button)
 
         self.instance_list = QListWidget()
         self.instance_list.setObjectName("instanceList")
         self.instance_list.currentItemChanged.connect(self._select_instance)
-        legacy_layout.addWidget(self.instance_list)
+        self.instance_list.setMinimumHeight(100)
+        library.addWidget(self.instance_list, 1)
+        library.addWidget(QLabel("New instance"))
         instance_row = QHBoxLayout()
         self.instance_name_input = QLineEdit()
         self.instance_name_input.setObjectName("instanceNameInput")
         self.instance_name_input.setPlaceholderText("Name a new instance")
-        self.create_instance_button = QPushButton("Create instance")
+        self.create_instance_button = QPushButton("Create")
         self.create_instance_button.setObjectName("createInstanceButton")
         self.create_instance_button.clicked.connect(self._create_instance)
         instance_row.addWidget(self.instance_name_input)
         instance_row.addWidget(self.create_instance_button)
-        legacy_layout.addLayout(instance_row)
+        library.addLayout(instance_row)
+        tools.addWidget(QLabel("Manage instance"))
         mutation_row = QHBoxLayout()
-        self.rename_instance_button = QPushButton("Rename selected")
+        self.rename_instance_button = QPushButton("Rename")
         self.rename_instance_button.setObjectName("renameInstanceButton")
         self.rename_instance_button.clicked.connect(self._rename_selected_instance)
-        self.duplicate_instance_button = QPushButton("Duplicate selected")
+        self.duplicate_instance_button = QPushButton("Duplicate")
         self.duplicate_instance_button.setObjectName("duplicateInstanceButton")
         self.duplicate_instance_button.clicked.connect(self._duplicate_selected_instance)
-        self.delete_instance_button = QPushButton("Delete selected")
+        self.delete_instance_button = QPushButton("Delete")
         self.delete_instance_button.setObjectName("deleteInstanceButton")
         self.delete_instance_button.clicked.connect(self._delete_selected_instance)
         mutation_row.addWidget(self.rename_instance_button)
         mutation_row.addWidget(self.duplicate_instance_button)
         mutation_row.addWidget(self.delete_instance_button)
-        legacy_layout.addLayout(mutation_row)
-        diagnostics_row = QHBoxLayout()
-        self.open_folder_button = QPushButton("Open instance folder")
-        self.open_folder_button.setObjectName("openFolderButton")
-        self.open_folder_button.clicked.connect(self._open_instance_folder)
-        self.open_folder_button.setEnabled(False)
-        diagnostics_row.addWidget(self.open_folder_button)
+        tools.addLayout(mutation_row)
         self.save_log_button = QPushButton("Save diagnostic log")
         self.save_log_button.setObjectName("saveDiagnosticLogButton")
         self.save_log_button.clicked.connect(self._save_diagnostic_log)
         self.save_log_button.setEnabled(False)
-        diagnostics_row.addWidget(self.save_log_button)
-        legacy_layout.addLayout(diagnostics_row)
+        tools.addWidget(self.save_log_button)
+        tools.addWidget(QLabel("Install & import"))
+        install_tools = QGridLayout()
+        install_tools.setSpacing(8)
+        install_tools.setColumnStretch(0, 1)
+        install_tools.setColumnStretch(1, 1)
+        tools.addLayout(install_tools)
         self.install_button = QPushButton("Install Minecraft")
         self.install_button.setObjectName("installButton")
         self.install_button.clicked.connect(self._install_selected_instance)
-        legacy_layout.addWidget(self.install_button)
-        self.import_modpack_button = QPushButton("Import Modrinth .mrpack")
+        install_tools.addWidget(self.install_button, 0, 0)
+        self.import_modpack_button = QPushButton("Import .mrpack")
         self.import_modpack_button.setObjectName("importModpackButton")
         self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
-        legacy_layout.addWidget(self.import_modpack_button)
-        self.manage_mods_button = QPushButton("Manage mods for selected instance")
+        install_tools.addWidget(self.import_modpack_button, 1, 0)
+        self.manage_mods_button = QPushButton("Manage mods")
         self.manage_mods_button.setObjectName("manageModsButton")
         self.manage_mods_button.clicked.connect(lambda: self._show_page(3))
-        legacy_layout.addWidget(self.manage_mods_button)
-        self.update_modpack_button = QPushButton("Update selected pack")
+        install_tools.addWidget(self.manage_mods_button, 0, 1)
+        self.update_modpack_button = QPushButton("Update pack")
         self.update_modpack_button.setObjectName("updateModpackButton")
         self.update_modpack_button.clicked.connect(self._update_selected_modrinth_pack)
-        legacy_layout.addWidget(self.update_modpack_button)
-        self.recover_modpack_button = QPushButton("Recover last Modrinth update")
+        install_tools.addWidget(self.update_modpack_button, 2, 0)
+        self.recover_modpack_button = QPushButton("Recover update")
         self.recover_modpack_button.setObjectName("recoverModpackButton")
         self.recover_modpack_button.clicked.connect(self._recover_selected_modrinth_pack)
-        legacy_layout.addWidget(self.recover_modpack_button)
-        self.install_optifine_button = QPushButton("Install local OptiFine .jar")
+        install_tools.addWidget(self.recover_modpack_button, 2, 1)
+        self.install_optifine_button = QPushButton("Install OptiFine .jar")
         self.install_optifine_button.setObjectName("installOptifineButton")
         self.install_optifine_button.clicked.connect(self._install_local_optifine)
-        legacy_layout.addWidget(self.install_optifine_button)
-        self.import_curseforge_button = QPushButton("Import CurseForge ZIP")
+        install_tools.addWidget(self.install_optifine_button, 3, 0)
+        self.import_curseforge_button = QPushButton("Import CurseForge")
         self.import_curseforge_button.setObjectName("importCurseForgeButton")
         self.import_curseforge_button.clicked.connect(self._import_curseforge_pack)
-        legacy_layout.addWidget(self.import_curseforge_button)
-        self.content_stack.addWidget(legacy_panel)
+        install_tools.addWidget(self.import_curseforge_button, 1, 1)
+        tools.addStretch(1)
+        legacy_panel.setMaximumWidth(1160)
+        instances_page = QWidget(root)
+        instances_page_layout = QHBoxLayout(instances_page)
+        instances_page_layout.setContentsMargins(0, 0, 0, 0)
+        instances_page_layout.addWidget(legacy_panel)
+        self.content_stack.addWidget(instances_page)
         browse_panel = QWidget(root)
         browse_layout = QVBoxLayout(browse_panel)
         browse_layout.setContentsMargins(26, 20, 26, 20)
@@ -478,7 +539,11 @@ class LauncherWindow(QMainWindow):
         details.addStretch(1)
         browse_body.addLayout(details, 1)
         browse_layout.addLayout(browse_body, 1)
-        self.content_stack.addWidget(browse_panel)
+        browse_scroll = QScrollArea(root)
+        browse_scroll.setWidgetResizable(True)
+        browse_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        browse_scroll.setWidget(browse_panel)
+        self.content_stack.addWidget(browse_scroll)
         mods_panel = QWidget(root)
         mods_layout = QVBoxLayout(mods_panel)
         mods_layout.setContentsMargins(26, 24, 26, 24)
@@ -536,9 +601,14 @@ class LauncherWindow(QMainWindow):
         mods_actions.addWidget(self.toggle_mod_button)
         mods_actions.addWidget(self.remove_mod_button)
         mods_layout.addLayout(mods_actions)
-        self.content_stack.addWidget(mods_panel)
+        mods_scroll = QScrollArea(root)
+        mods_scroll.setWidgetResizable(True)
+        mods_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        mods_scroll.setWidget(mods_panel)
+        self.content_stack.addWidget(mods_scroll)
         self.mods_panel = mods_panel
         layout.addWidget(self.content_stack, 1)
+        layout.addWidget(launch_bar)
         self.setCentralWidget(root)
         self._apply_compact_theme()
         self._show_page(0)
@@ -547,7 +617,16 @@ class LauncherWindow(QMainWindow):
         self.resize(920, 560)
         self.setMinimumSize(680, 420)
         self.setStyleSheet("""
-            QWidget { background: #161b19; color: #eef3e9; }
+            QWidget { background: #161b19; color: #eef3e9; font-family: "DejaVu Sans"; font-size: 12px; }
+            QLabel { background: transparent; }
+            QLabel#instancesHeading { font-size: 20px; font-weight: 700; }
+            QLabel#selectedInstanceHeading { font-size: 16px; font-weight: 650; }
+            QLabel#selectedInstanceDescription { color: #a7b3a9; }
+            QScrollArea#instanceToolsScroll, QScrollArea#instanceLibraryScroll { background: transparent; }
+            QListWidget { background: #1b231e; border: 1px solid #3b453d; border-radius: 8px; padding: 6px; outline: 0; }
+            QListWidget::item { padding: 12px 10px; border-radius: 6px; }
+            QListWidget::item:selected { background: #2c3d30; color: #eef3e9; }
+            QListWidget::item:hover { background: #252e28; }
             QFrame#titleBar { background: #172019; }
             QFrame#navigationBar { background: #172019; }
             QPushButton#homeNavButton[active="true"], QPushButton#instancesNavButton[active="true"], QPushButton#browseNavButton[active="true"], QPushButton#modsNavButton[active="true"] { background: #2c3d30; color: #e6f4dc; }
@@ -559,11 +638,20 @@ class LauncherWindow(QMainWindow):
             QLineEdit, QComboBox { background: #252e28; color: #eef3e9; border: 1px solid #3b453d; border-radius: 7px; padding: 8px 13px; min-height: 28px; }
             QLabel#selectorEmptyLabel { color: #a7b3a9; font-size: 11px; }
             QLineEdit#setupSearchInput { min-height: 18px; padding: 4px 9px; }
-            QPushButton { background: transparent; color: #c7d2c9; border: 1px solid transparent; border-radius: 7px; padding: 8px 12px; }
-            QPushButton:hover { background: #ffffff10; border-color: #516052; }
+            QPushButton { background: #202a23; color: #dce7de; border: 1px solid #3b453d; border-radius: 7px; padding: 8px 12px; }
+            QPushButton:hover { background: #2c3d30; }
+            QPushButton:disabled { color: #849187; background: #1c241f; border-color: #303b32; }
+            QPushButton#homeNavButton, QPushButton#instancesNavButton, QPushButton#browseNavButton, QPushButton#modsNavButton, QPushButton#settingsButton { background: transparent; border-color: transparent; }
+            QPushButton#openFolderButton { background: #2c3d30; border-color: #7c9d68; color: #e6f4dc; font-weight: 650; min-width: 120px; }
+            QPushButton#openFolderButton:disabled { background: #202a23; border-color: #3b453d; color: #849187; }
+            QPushButton#deleteInstanceButton { background: #352322; color: #ffb4a8; border-color: transparent; }
             QPushButton#playButton { background: #a6e175; color: #1c2c16; border-color: #b7eb89; font-weight: 750; min-width: 120px; }
             QPushButton#playButton:disabled { background: #35452f; color: #a9c597; border-color: #53664a; }
             QLineEdit:focus, QComboBox:focus, QPushButton:focus { border: 2px solid #a6e175; }
+            QScrollBar:vertical { background: #1b231e; width: 8px; margin: 0; }
+            QScrollBar::handle:vertical { background: #516052; border-radius: 4px; min-height: 24px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
             QProgressBar { background: #3a473c; border: 0; border-radius: 2px; height: 4px; }
             QProgressBar::chunk { background: #a6e175; }
             QLabel#modsWarningLabel { color: #e7c17a; }
@@ -586,6 +674,14 @@ class LauncherWindow(QMainWindow):
             return
         index = 0 if index not in (0, 1, 2, 3) else index
         self.content_stack.setCurrentIndex(index)
+        # Instances already provides selection; keep more space for its tools.
+        for control in (self.username_field_label, self.setup_field_label,
+                        self.username_input, self.setup_selector, self.setup_search_input):
+            control.setVisible(index == 0)
+        self.selector_empty_label.setVisible(
+            index == 0 and bool(self.setup_search_input.text().strip())
+            and self.setup_selector.currentIndex() < 0
+        )
         self.home_nav_button.setProperty("active", index == 0)
         self.instances_nav_button.setProperty("active", index == 1)
         self.browse_nav_button.setProperty("active", index == 2)
@@ -1855,6 +1951,7 @@ class LauncherWindow(QMainWindow):
         row = self.instance_list.currentRow()
         if row >= 0:
             self.instance_list.item(row).setText(instance["name"])
+            self.selected_instance_heading.setText(str(instance["name"]))
         self.store.save(self.state)
         self._rebuild_setup_selector(selected=instance["id"])
         self.instance_status_label.setText(f"Selected instance: {instance['name']}")
@@ -1928,6 +2025,10 @@ class LauncherWindow(QMainWindow):
 
     def _select_instance(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
+            self.open_folder_button.setEnabled(False)
+            self.open_screenshots_button.setEnabled(False)
+            self.selected_instance_heading.setText("Select an instance")
+            self.selected_instance_description.setText("Choose a saved setup on the left, or create a new one.")
             if self._preserve_lifecycle_status():
                 return
             self.instance_status_label.setText("No instance selected")
@@ -1951,6 +2052,11 @@ class LauncherWindow(QMainWindow):
                 self.setup_selector.setCurrentIndex(selector_row)
                 self.setup_selector.blockSignals(False)
         self.open_folder_button.setEnabled(instance is not None)
+        self.open_screenshots_button.setEnabled(instance is not None)
+        if instance:
+            self.selected_instance_heading.setText(str(instance["name"]))
+            version = instance.get("version") or "Not installed"
+            self.selected_instance_description.setText(f"Minecraft {version}" if instance.get("version") else version)
         self.save_log_button.setEnabled(instance is not None)
         if instance and instance.get("ready"):
             self.instance_status_label.setText(f"Ready: {current.text()} ({instance.get('version')})")
@@ -2328,6 +2434,29 @@ class LauncherWindow(QMainWindow):
             instance["last_event"] = message
             instance["last_event_at"] = datetime.now(timezone.utc).isoformat()
             self.store.save(self.state)
+
+    def _open_selected_instance_folder(self) -> None:
+        self._open_selected_game_directory(screenshots=False)
+
+    def _open_instance_screenshots(self) -> None:
+        self._open_selected_game_directory(screenshots=True)
+
+    def _open_selected_game_directory(self, *, screenshots: bool) -> None:
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        label = "screenshots folder" if screenshots else "instance folder"
+        try:
+            folder = self.store.instance_minecraft_root(instance["id"])
+            if screenshots:
+                folder = folder / "screenshots"
+                folder.mkdir(parents=True, exist_ok=True)
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        except OSError as error:
+            self.diagnostic_hint_label.setText(f"Could not open {label}: {error}")
+            return
+        result = "Opened" if opened else "Could not open"
+        self.diagnostic_hint_label.setText(f"{result} {label}: {folder}")
 
     def _open_instance_folder(self) -> None:
         instance = self._diagnostic_instance()

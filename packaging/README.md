@@ -14,14 +14,25 @@ installation step.
 
 ## Build
 
-From the repository root, run:
+Before a new release, bump the version from the repository root:
+
+```sh
+python3 packaging/bump-version.py                 # patch: 0.1.3 -> 0.1.4
+# python3 packaging/bump-version.py minor         # minor release
+# python3 packaging/bump-version.py major         # major release
+# python3 packaging/bump-version.py --dry-run     # preview without changing files
+```
+
+The script updates `src/mclauncher/__init__.py`, the single version source used
+by the app, Python package metadata, and Debian packaging. It does not commit,
+push, or publish. Bump once for each release, then build (rebuilding does not
+bump the version):
 
 ```sh
 SOURCE_DATE_EPOCH=0 packaging/build-deb.sh
 ```
 
-The output is `dist/mclauncher_<project-version>_amd64.deb` (currently
-`dist/mclauncher_0.1.3_amd64.deb`). Existing files in `dist/` are preserved;
+The output is `dist/mclauncher_<project-version>_amd64.deb`. Existing files in `dist/` are preserved;
 only this package and its metadata files are replaced. Set `SOURCE_DATE_EPOCH` to a
 release timestamp for stable archive timestamps. Exact byte-for-byte
 reproducibility also requires the pinned build tools, wheel artifacts, compiler,
@@ -49,6 +60,11 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src ubuntu:24.04 \
     SOURCE_DATE_EPOCH=0 packaging/build-deb.sh'
 ```
 
-Install and inspect the result with `sudo apt install ./dist/mclauncher_0.1.3_amd64.deb`.
+Install or upgrade to the current source version:
+
+```sh
+version=$(PYTHONPATH=src python3 -c 'from mclauncher import __version__; print(__version__)')
+sudo apt install "./dist/mclauncher_${version}_amd64.deb"
+```
 The build and package checks do not prove a clean physical desktop or a real
 Minecraft launch; those require a graphical Ubuntu host and a Mojang download.
