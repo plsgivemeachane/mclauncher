@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mclauncher": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "mclauncher.mcp_server"]
+    }
+  }
+}

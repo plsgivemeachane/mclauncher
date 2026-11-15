@@ -28,6 +28,17 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q
 
 See [packaging instructions](packaging/README.md) for the supported Ubuntu build environment.
 
+## Control the launcher from an AI assistant (MCP)
+
+`mclauncher-mcp` is an [MCP](https://modelcontextprotocol.io) server that lets an assistant such as Claude Code create instances, install Minecraft versions, import Modrinth `.mrpack` / CurseForge `.zip` modpacks, launch and stop the game, and read game logs. It runs headless against the same data folder as the desktop app, so both can be open at once; the desktop app shows new instances after a restart.
+
+```sh
+python -m pip install -e '.[mcp]'
+claude mcp add mclauncher -- "$PWD/.venv/bin/mclauncher-mcp"
+```
+
+This repository also ships a project `.mcp.json`, so Claude Code started here offers the server automatically. For an HTTP endpoint instead of stdio, run `mclauncher-mcp --transport streamable-http --port 8765` (binds to `127.0.0.1`; there is no authentication, so do not expose it to a network). Installs and imports run as background jobs: tools return a job id to poll with `get_job`.
+
 ## CI and releases
 
 Pull requests and pushes to `main` run the regression suite, compile checks, and shell syntax checks. After successful checks on `main`, CI reads `__version__` from `src/mclauncher/__init__.py`. If `v<version>` has no GitHub release yet, CI builds the `.deb`, checks its version and architecture, and publishes a release with the package, SHA-256 checksum, and package metadata. The first push publishes the current version automatically.
