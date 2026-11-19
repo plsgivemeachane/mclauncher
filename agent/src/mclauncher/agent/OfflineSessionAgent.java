@@ -31,6 +31,7 @@ public final class OfflineSessionAgent {
     static final String AUTH_HOST = "https://authserver.mojang.com";
     static final String ACCOUNT_HOST = "https://api.mojang.com";
     static final String JOIN_PATH = "/session/minecraft/join";
+    static final String LOOPBACK_HOST = "127.0.0.1";
 
     private OfflineSessionAgent() {
     }
@@ -70,14 +71,18 @@ public final class OfflineSessionAgent {
             return;
         }
         // authlib only honours custom hosts when the whole set is present.
-        System.setProperty("minecraft.api.session.host", "http://127.0.0.1:" + port[0]);
+        System.setProperty("minecraft.api.session.host", "http://" + LOOPBACK_HOST + ":" + port[0]);
         System.setProperty("minecraft.api.services.host", SERVICES_HOST);
         System.setProperty("minecraft.api.auth.host", AUTH_HOST);
         System.setProperty("minecraft.api.account.host", ACCOUNT_HOST);
     }
 
     static int start() throws IOException {
-        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        // Bind the literal IPv4 loopback the session host URL names. Forge
+        // launches with -Djava.net.preferIPv6Addresses=system, which turns
+        // getLoopbackAddress() into ::1 and leaves 127.0.0.1 refusing joins.
+        InetAddress loopback = InetAddress.getByAddress(LOOPBACK_HOST, new byte[] {127, 0, 0, 1});
+        HttpServer server = HttpServer.create(new InetSocketAddress(loopback, 0), 0);
         server.setExecutor(Executors.newCachedThreadPool(task -> {
             Thread thread = new Thread(task, "mclauncher-session-relay");
             thread.setDaemon(true);

@@ -58,13 +58,19 @@ def test_build_command_loads_agent(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not (shutil.which("java") and shutil.which("javac")), reason="needs a JDK")
-def test_agent_accepts_join_and_lets_game_exit(tmp_path):
+@pytest.mark.parametrize("jvm_flags", [
+    [],
+    # Forge 1.20.x adds this flag; it makes the default loopback ::1.
+    ["-Djava.net.preferIPv6Addresses=system"],
+    ["-Djava.net.preferIPv6Addresses=true"],
+], ids=["default", "forge-ipv6-system", "ipv6-true"])
+def test_agent_accepts_join_and_lets_game_exit(tmp_path, jvm_flags):
     (tmp_path / "Probe.java").write_text(PROBE, encoding="utf-8")
     subprocess.run(["javac", "Probe.java"], cwd=tmp_path, check=True)
 
     # The timeout also proves the relay's threads do not keep the JVM alive.
     result = subprocess.run(
-        ["java", f"-javaagent:{AGENT}", "-cp", ".", "Probe"],
+        ["java", *jvm_flags, f"-javaagent:{AGENT}", "-cp", ".", "Probe"],
         cwd=tmp_path, capture_output=True, text=True, timeout=30,
     )
 
