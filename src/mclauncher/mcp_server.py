@@ -80,6 +80,11 @@ def build_server(controller: LauncherController | None = None) -> MCPServer:
         return created
 
     @tool()
+    def delete_instance(instance: str) -> dict[str, Any]:
+        """Permanently delete an instance and its folder (worlds included). Refused while it is running or installing."""
+        return control.delete_instance(instance)
+
+    @tool()
     def rename_instance(instance: str, new_name: str) -> dict[str, Any]:
         """Rename an instance."""
         return control.rename_instance(instance, new_name)

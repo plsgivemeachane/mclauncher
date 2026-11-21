@@ -91,6 +91,21 @@ def test_create_and_install_vanilla_instance_persists_for_the_gui(tmp_path):
                           install_state="ready")]
 
 
+def test_delete_instance_removes_folder_and_state(tmp_path):
+    control = _controller(tmp_path)
+    keep = control.create_instance("Keep")
+    gone = control.create_instance("Gone")
+    root = control.store.instance_root(gone["id"])
+    (root / "saves").mkdir(parents=True, exist_ok=True)
+
+    assert control.delete_instance("gone") == {"deleted": gone["id"], "name": "Gone"}
+
+    assert not root.exists()
+    assert [item["id"] for item in LauncherStore(tmp_path / "data").load()["instances"]] == [keep["id"]]
+    with pytest.raises(ControlError, match="No instance matches"):
+        control.delete_instance("Gone")
+
+
 def test_duplicate_names_are_suffixed_like_the_gui(tmp_path):
     control = _controller(tmp_path)
     control.create_instance("Pack")
@@ -222,7 +237,7 @@ def test_mcp_server_exposes_tools_and_reports_errors(tmp_path):
 
     async def scenario():
         names = {tool.name for tool in await server.list_tools()}
-        assert {"create_instance", "import_modpack", "launch_game", "get_job", "stop_game", "set_curseforge_public_downloads"} <= names
+        assert {"create_instance", "import_modpack", "launch_game", "get_job", "stop_game", "set_curseforge_public_downloads", "delete_instance"} <= names
         result = await server.call_tool("create_instance", {"name": "Via MCP", "version": "1.21.1", "install": True})
         payload = json.loads(result.content[0].text)
         assert payload["job"]["status"] == "succeeded"

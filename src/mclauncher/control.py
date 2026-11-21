@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -252,6 +253,30 @@ class LauncherController:
             instance["name"] = new_name
             self.store.save(self.state)
             return self.summarize(instance)
+
+    def delete_instance(self, ref: str) -> dict[str, Any]:
+        """Remove an instance and its folder, as the desktop app's Delete button does."""
+        with self._lock:
+            self._reload()
+            instance = self._find(ref)
+            instance_id = str(instance["id"])
+            self._refuse_if_busy(instance_id)
+            root = self.store.instance_root(instance_id)
+            if root.exists():
+                try:
+                    shutil.rmtree(root)
+                except OSError as error:
+                    raise ControlError(f"Could not delete instance folder: {error}") from error
+            self.state["instances"] = [item for item in self.state["instances"] if item.get("id") != instance_id]
+            self.state["automatic_instances"] = {
+                version: value for version, value in self.state.get("automatic_instances", {}).items()
+                if value != instance_id
+            }
+            for key in ("selected_instance_id", "selected_setup_id"):
+                if self.state.get(key) == instance_id:
+                    self.state[key] = ""
+            self.store.save(self.state)
+        return {"deleted": instance_id, "name": instance.get("name")}
 
     def _refuse_if_busy(self, instance_id: str) -> None:
         if instance_id in self._busy_instances:
