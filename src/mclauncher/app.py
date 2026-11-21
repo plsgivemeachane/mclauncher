@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QListWidget,
     QListWidgetItem,
+    QButtonGroup,
     QComboBox,
     QCheckBox,
     QDialog,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QMainWindow,
+    QMenu,
     QProgressBar,
     QPushButton,
     QMessageBox,
@@ -42,7 +44,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .persistence import LauncherStore, game_directory_for
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
-from .memory import default_memory_gib, validate_memory_gib
+from .memory import default_memory_gib, validate_memory_gib, whole_physical_memory_gib
 from .lifecycle import GameProcessRegistry
 from .modpack import (
     CurseForgePackError,
@@ -60,10 +62,13 @@ from .optifine import OptiFineError, OptiFineInstaller
 from .localmods import copy_mod_to_instance, inspect_mod_jar
 from .identity import USERNAME_RE, local_identity
 from . import ui
-from .ui import RowDelegate, RowInfo, VersionPicker, rule, set_role
+from .ui import ROW_INFO_ROLE, RowDelegate, RowInfo, VersionPicker, rule, set_role
 
 _ACTIVE_DISCOVERY_WORKERS: set[QThread] = set()
 _ACTIVE_INSTALL_WORKERS: set[QThread] = set()
+
+
+PACK_DETAILS_PROMPT = "Pick a pack from the results to see what it includes."
 
 
 def _release_discovery_worker(worker: QThread) -> None:
@@ -195,11 +200,14 @@ class LauncherWindow(QMainWindow):
         self._start_version_discovery()
 
     def _build_ui(self) -> None:
+        # Focus rings follow the keyboard, not mouse clicks or focus hand-offs.
+        ui.install_focus_visibility()
         root = QWidget(self)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # ── Top bar ────────────────────────────────────────────────────────
         header = QFrame(root)
         header.setObjectName("titleBar")
         header_layout = QHBoxLayout(header)
@@ -219,7 +227,8 @@ class LauncherWindow(QMainWindow):
         self.instances_nav_button.setObjectName("instancesNavButton")
         self.home_nav_button.clicked.connect(lambda: self._show_page(0))
         self.instances_nav_button.clicked.connect(lambda: self._show_page(1))
-        self.browse_nav_button = QPushButton("Browse", navigation)
+        # The tab is named for what the page is about, matching its heading.
+        self.browse_nav_button = QPushButton("Modpacks", navigation)
         self.browse_nav_button.setObjectName("browseNavButton")
         self.browse_nav_button.clicked.connect(lambda: self._show_page(2))
         self.mods_nav_button = QPushButton("Mods", navigation)
@@ -235,8 +244,12 @@ class LauncherWindow(QMainWindow):
         for button in (self.home_nav_button, self.instances_nav_button, self.browse_nav_button,
                        self.mods_nav_button, self.settings_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.home_nav_button.setAccessibleName("Home: play")
+        self.instances_nav_button.setAccessibleName("Instances: manage setups")
+        self.browse_nav_button.setAccessibleName("Modpacks: browse and import")
         layout.addWidget(header)
 
+        # ── Home: artwork hero that explains the current launch target ─────
         self.content_stack = QStackedWidget(root)
         self.content_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.home_panel = QWidget(root)
@@ -246,30 +259,46 @@ class LauncherWindow(QMainWindow):
         self.home_artwork = scene
         scene_layout = QVBoxLayout(scene)
         scene_layout.setContentsMargins(28, 22, 28, 18)
-        scene_layout.setSpacing(2)
+        scene_layout.setSpacing(4)
         scene_layout.addStretch(1)
+        self.hero_eyebrow = QLabel("", scene)
+        self.hero_eyebrow.setObjectName("heroEyebrow")
         self.hero_title = QLabel("", scene)
         self.hero_title.setObjectName("heroTitle")
+        self.hero_title.setWordWrap(True)
         self.hero_detail = QLabel("", scene)
         self.hero_detail.setObjectName("heroDetail")
+        self.hero_detail.setWordWrap(True)
+        scene_layout.addWidget(self.hero_eyebrow, 0, Qt.AlignmentFlag.AlignLeft)
         scene_layout.addWidget(self.hero_title)
         scene_layout.addWidget(self.hero_detail)
         home_layout.addWidget(scene, 1)
 
+        # ── Launch dock: shared by every page ──────────────────────────────
         launch_bar = QFrame(root)
         launch_bar.setObjectName("launchBar")
         launch_layout = QVBoxLayout(launch_bar)
-        launch_layout.setContentsMargins(20, 12, 20, 16)
+        launch_layout.setContentsMargins(20, 10, 20, 12)
         launch_layout.setSpacing(6)
+        self._launch_layout = launch_layout
 
-        self.instance_status_label = QLabel("No saved setup selected", launch_bar)
+        self.instance_status_label = ui.StatusLabel("Choose a version or setup to play", launch_bar)
         self.instance_status_label.setObjectName("instanceStatusLabel")
         self.instance_status_label.setWordWrap(True)
+        self.instance_status_label.changed.connect(self._refresh_status_visibility)
         launch_layout.addWidget(self.instance_status_label)
-        self.diagnostic_hint_label = QLabel(launch_bar)
+        hint_row = QHBoxLayout()
+        hint_row.setSpacing(10)
+        self.diagnostic_hint_label = ui.HintLabel(launch_bar)
         self.diagnostic_hint_label.setObjectName("diagnosticHintLabel")
-        self.diagnostic_hint_label.setWordWrap(True)
-        launch_layout.addWidget(self.diagnostic_hint_label)
+        hint_row.addWidget(self.diagnostic_hint_label, 1)
+        self.retry_discovery_button = QPushButton("Retry", launch_bar)
+        self.retry_discovery_button.setObjectName("retryDiscoveryButton")
+        self.retry_discovery_button.setToolTip("Download the Minecraft version list again")
+        self.retry_discovery_button.clicked.connect(self._retry_version_discovery)
+        self.retry_discovery_button.hide()
+        hint_row.addWidget(self.retry_discovery_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        launch_layout.addLayout(hint_row)
         self.install_progress = QProgressBar(launch_bar)
         self.install_progress.setObjectName("installProgress")
         self.install_progress.setRange(0, 100)
@@ -280,6 +309,7 @@ class LauncherWindow(QMainWindow):
         controls = QGridLayout()
         controls.setHorizontalSpacing(10)
         controls.setVerticalSpacing(4)
+        self._launch_controls = controls
         username_label = QLabel("Player name", launch_bar)
         username_label.setObjectName("usernameFieldLabel")
         self.username_field_label = username_label
@@ -291,22 +321,31 @@ class LauncherWindow(QMainWindow):
         self.username_input = QLineEdit()
         self.username_input.setObjectName("usernameInput")
         self.username_input.setPlaceholderText("Steve")
+        self.username_input.setAccessibleName("Player name")
+        self.username_input.setAccessibleDescription("Your offline name in game, 3 to 16 letters, digits or underscores")
+        self.username_input.setToolTip("Your offline name in game: 3–16 letters, digits or underscores")
         self.username_input.setMinimumHeight(52)
+        self.username_input.setMinimumWidth(130)
         self.username_input.setMaximumWidth(240)
         self.username_input.editingFinished.connect(self._save_username)
+        username_label.setBuddy(self.username_input)
         controls.addWidget(self.username_input, 1, 0)
         self.setup_selector = VersionPicker(self._describe_row, launch_bar)
         self.setup_selector.setObjectName("setupSelector")
+        self.setup_selector.setAccessibleName("Version or setup")
+        self.setup_selector.setAccessibleDescription(
+            "What Play starts. Press Space or Alt+Down to search versions and setups.")
         self.setup_selector.setMinimumHeight(52)
         self.setup_selector.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setup_selector.currentIndexChanged.connect(self._select_setup_from_selector)
+        setup_label.setBuddy(self.setup_selector)
         controls.addWidget(self.setup_selector, 1, 1)
         self.play_button = QPushButton("▶  Play", launch_bar)
         self.play_button.setObjectName("playButton")
         self.play_button.setMinimumHeight(52)
         self.play_button.clicked.connect(self._play_selected_instance)
         self.play_button.setEnabled(False)
-        self.play_button.setMinimumWidth(150)
+        self.play_button.setMinimumWidth(170)
         self.play_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_folder_button = QPushButton("Open folder", launch_bar)
         self.open_folder_button.setObjectName("openFolderButton")
@@ -334,13 +373,13 @@ class LauncherWindow(QMainWindow):
         self.setup_selector.adopt(self.setup_search_input, self.selector_empty_label)
         self.setup_search_input.textChanged.connect(lambda _text: self.setup_selector.popup.refresh())
         self.setup_selector.currentIndexChanged.connect(lambda _index: self._refresh_hero())
-        # Shared launch controls stay available on every page.
         self.content_stack.addWidget(self.home_panel)
 
+        # ── Instances: library (create and import) beside the selected setup ──
         legacy_panel = QWidget(root)
         legacy_layout = QVBoxLayout(legacy_panel)
-        legacy_layout.setContentsMargins(24, 18, 24, 12)
-        legacy_layout.setSpacing(12)
+        legacy_layout.setContentsMargins(24, 16, 24, 12)
+        legacy_layout.setSpacing(10)
         self.instances_panel = legacy_panel
         heading = QLabel("Instances", legacy_panel)
         heading.setObjectName("instancesHeading")
@@ -352,46 +391,32 @@ class LauncherWindow(QMainWindow):
         library_scroll.setObjectName("instanceLibraryScroll")
         library_scroll.setWidgetResizable(True)
         library_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        library_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        library_scroll.setMinimumWidth(276)
         library_panel = QWidget()
-        library_panel.setMinimumHeight(220)
         library = QVBoxLayout(library_panel)
         library.setContentsMargins(0, 0, 8, 0)
         library.setSpacing(8)
         library_scroll.setWidget(library_panel)
+        self._library_scroll = library_scroll
         instance_body.addWidget(library_scroll, 2)
         tools_scroll = QScrollArea(legacy_panel)
         tools_scroll.setObjectName("instanceToolsScroll")
         tools_scroll.setWidgetResizable(True)
         tools_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        tools_scroll.setMinimumWidth(340)
+        tools_scroll.setMinimumWidth(300)
         tools_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         tools_panel = QFrame()
         tools_panel.setObjectName("instanceToolsCard")
         set_role(tools_panel, "card")
         tools = QVBoxLayout(tools_panel)
-        tools.setContentsMargins(18, 16, 18, 16)
-        tools.setSpacing(10)
+        tools.setContentsMargins(18, 14, 18, 16)
+        tools.setSpacing(8)
         tools_scroll.setWidget(tools_panel)
         instance_body.addWidget(tools_scroll, 3)
         legacy_layout.addLayout(instance_body, 1)
-        self.selected_instance_heading = QLabel("Select an instance")
-        self.selected_instance_heading.setObjectName("selectedInstanceHeading")
-        self.selected_instance_heading.setWordWrap(True)
-        tools.addWidget(self.selected_instance_heading)
-        self.selected_instance_description = QLabel("Pick a setup from the list, or create a new one below it.")
-        self.selected_instance_description.setObjectName("selectedInstanceDescription")
-        self.selected_instance_description.setWordWrap(True)
-        tools.addWidget(self.selected_instance_description)
-        self.open_screenshots_button = QPushButton("Open screenshots")
-        self.open_screenshots_button.setObjectName("openScreenshotsButton")
-        self.open_screenshots_button.clicked.connect(self._open_instance_screenshots)
-        self.open_screenshots_button.setEnabled(False)
-        self._instance_quick_row = QHBoxLayout()
-        self._instance_quick_row.setSpacing(8)
-        self._instance_quick_row.addWidget(self.open_screenshots_button)
-        tools.addLayout(self._instance_quick_row)
 
-        # Retain the settings controls for existing handlers without orphan form labels.
+        # Hidden compatibility controls used by existing handlers and tests.
         hidden_settings = QWidget(legacy_panel)
         hidden_settings.hide()
         hidden_settings_layout = QVBoxLayout(hidden_settings)
@@ -407,7 +432,6 @@ class LauncherWindow(QMainWindow):
         self.identity_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         identity_form.addRow("", self.identity_label)
         hidden_settings_layout.addLayout(identity_form)
-
         memory_form = QFormLayout()
         self.memory_input = QLineEdit()
         self.memory_input.setObjectName("memoryInput")
@@ -448,27 +472,92 @@ class LauncherWindow(QMainWindow):
         launch_layout.insertWidget(1, self.username_warning)
         launch_layout.insertWidget(2, self.confirm_username_change_button)
 
-        self.instance_list = QListWidget()
+        # Library column: every way to get a new setup lives here.
+        self.instance_list = ui.PlaceholderList()
         self.instance_list.setObjectName("instanceList")
+        self.instance_list.setAccessibleName("Your setups")
+        self.instance_list.set_placeholder("No setups yet", "Name one below, or import a modpack file.")
         self.instance_list.currentItemChanged.connect(self._select_instance)
-        self.instance_list.setMinimumHeight(100)
+        self.instance_list.setMinimumHeight(96)
         self.instance_list.setItemDelegate(RowDelegate(self._describe_instance_row, self.instance_list))
         self.instance_list.setMouseTracking(True)
         library.addWidget(self.instance_list, 1)
+        self._new_setup_title = set_role(QLabel("New setup"), "sectionTitle")
+        library.addWidget(self._new_setup_title)
         instance_row = QHBoxLayout()
         instance_row.setSpacing(8)
         self.instance_name_input = QLineEdit()
         self.instance_name_input.setObjectName("instanceNameInput")
         self.instance_name_input.setPlaceholderText("New setup name")
-        self.create_instance_button = QPushButton("Create setup")
+        self.instance_name_input.setAccessibleName("New setup name")
+        self.instance_name_input.setToolTip("Name a new setup, then press Create")
+        self.instance_name_input.returnPressed.connect(lambda: self._create_instance())
+        self.create_instance_button = QPushButton("Create")
         set_role(self.create_instance_button, "primary")
         self.create_instance_button.setObjectName("createInstanceButton")
+        self.create_instance_button.setAccessibleName("Create setup")
         self.create_instance_button.clicked.connect(self._create_instance)
-        instance_row.addWidget(self.instance_name_input)
+        instance_row.addWidget(self.instance_name_input, 1)
         instance_row.addWidget(self.create_instance_button)
+        # Compact windows fold both pack imports into one menu on this row,
+        # so the list above keeps room for whole rows.
+        self.import_pack_menu_button = QPushButton("Import")
+        self.import_pack_menu_button.setObjectName("importPackMenuButton")
+        self.import_pack_menu_button.setAccessibleName("Import a modpack file")
+        self.import_pack_menu_button.setToolTip("Create a setup from a modpack file on this computer")
+        import_menu = QMenu(self.import_pack_menu_button)
+        import_menu.setStyleSheet(ui.STYLESHEET)
+        import_menu.addAction("Modrinth pack (.mrpack)…", self._import_modrinth_pack)
+        import_menu.addAction("CurseForge pack (.zip)…", self._import_curseforge_pack)
+        self.import_pack_menu_button.setMenu(import_menu)
+        self.import_pack_menu_button.hide()
+        instance_row.addWidget(self.import_pack_menu_button)
         library.addLayout(instance_row)
+        import_row = QHBoxLayout()
+        import_row.setSpacing(8)
+        self.import_modpack_button = QPushButton("Import .mrpack")
+        self.import_modpack_button.setObjectName("importModpackButton")
+        self.import_modpack_button.setToolTip("Create a setup from a Modrinth modpack file on this computer")
+        self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
+        self.import_curseforge_button = QPushButton("CurseForge .zip")
+        self.import_curseforge_button.setObjectName("importCurseForgeButton")
+        self.import_curseforge_button.setToolTip("Create a setup from a CurseForge modpack .zip on this computer")
+        self.import_curseforge_button.clicked.connect(self._import_curseforge_pack)
+        import_row.addWidget(self.import_modpack_button)
+        import_row.addWidget(self.import_curseforge_button)
+        library.addLayout(import_row)
+
+        # Tools card: what you can do with the selected setup, by intent.
+        self.selected_instance_heading = QLabel("Select an instance")
+        self.selected_instance_heading.setObjectName("selectedInstanceHeading")
+        self.selected_instance_heading.setWordWrap(True)
+        tools.addWidget(self.selected_instance_heading)
+        self.selected_instance_description = QLabel("Pick a setup from the list, or create a new one.")
+        self.selected_instance_description.setObjectName("selectedInstanceDescription")
+        self.selected_instance_description.setWordWrap(True)
+        summary_row = QHBoxLayout()
+        summary_row.setSpacing(10)
+        summary_row.addWidget(self.selected_instance_description, 1)
+        # One plain state line, so the recommended action below is obvious.
+        self.selected_instance_state = QLabel("")
+        self.selected_instance_state.setObjectName("selectedInstanceState")
+        self.selected_instance_state.hide()
+        summary_row.addWidget(self.selected_instance_state, 0, Qt.AlignmentFlag.AlignTop)
+        tools.addLayout(summary_row)
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(8)
+        self.install_button = QPushButton("Install Minecraft")
+        self.install_button.setObjectName("installButton")
+        self.install_button.clicked.connect(self._install_selected_instance)
+        self.manage_mods_button = QPushButton("Manage mods")
+        self.manage_mods_button.setObjectName("manageModsButton")
+        self.manage_mods_button.clicked.connect(lambda: self._show_page(3))
+        primary_row.addWidget(self.install_button)
+        primary_row.addWidget(self.manage_mods_button)
+        tools.addLayout(primary_row)
+
         tools.addWidget(rule())
-        tools.addWidget(set_role(QLabel("Manage"), "sectionTitle"))
+        tools.addWidget(set_role(QLabel("Setup"), "sectionTitle"))
         mutation_row = QHBoxLayout()
         mutation_row.setSpacing(8)
         self.rename_instance_button = QPushButton("Rename")
@@ -485,46 +574,43 @@ class LauncherWindow(QMainWindow):
         mutation_row.addWidget(self.duplicate_instance_button)
         mutation_row.addWidget(self.delete_instance_button)
         tools.addLayout(mutation_row)
-        self.save_log_button = QPushButton("Save log")
-        self.save_log_button.setObjectName("saveDiagnosticLogButton")
-        self.save_log_button.clicked.connect(self._save_diagnostic_log)
-        self.save_log_button.setEnabled(False)
-        self._instance_quick_row.addWidget(self.save_log_button)
+
         tools.addWidget(rule())
-        tools.addWidget(set_role(QLabel("Install and import"), "sectionTitle"))
+        tools.addWidget(set_role(QLabel("Modpack and extras"), "sectionTitle"))
         install_tools = QGridLayout()
         install_tools.setSpacing(8)
         install_tools.setColumnStretch(0, 1)
         install_tools.setColumnStretch(1, 1)
         tools.addLayout(install_tools)
-        self.install_button = QPushButton("Install Minecraft")
-        self.install_button.setObjectName("installButton")
-        self.install_button.clicked.connect(self._install_selected_instance)
-        install_tools.addWidget(self.install_button, 0, 0)
-        self.import_modpack_button = QPushButton("Modrinth pack")
-        self.import_modpack_button.setObjectName("importModpackButton")
-        self.import_modpack_button.clicked.connect(self._import_modrinth_pack)
-        install_tools.addWidget(self.import_modpack_button, 1, 0)
-        self.manage_mods_button = QPushButton("Manage mods")
-        self.manage_mods_button.setObjectName("manageModsButton")
-        self.manage_mods_button.clicked.connect(lambda: self._show_page(3))
-        install_tools.addWidget(self.manage_mods_button, 0, 1)
         self.update_modpack_button = QPushButton("Update pack")
         self.update_modpack_button.setObjectName("updateModpackButton")
         self.update_modpack_button.clicked.connect(self._update_selected_modrinth_pack)
-        install_tools.addWidget(self.update_modpack_button, 2, 0)
+        install_tools.addWidget(self.update_modpack_button, 0, 0)
         self.recover_modpack_button = QPushButton("Recover update")
         self.recover_modpack_button.setObjectName("recoverModpackButton")
         self.recover_modpack_button.clicked.connect(self._recover_selected_modrinth_pack)
-        install_tools.addWidget(self.recover_modpack_button, 2, 1)
+        install_tools.addWidget(self.recover_modpack_button, 0, 1)
         self.install_optifine_button = QPushButton("Add OptiFine jar")
         self.install_optifine_button.setObjectName("installOptifineButton")
         self.install_optifine_button.clicked.connect(self._install_local_optifine)
-        install_tools.addWidget(self.install_optifine_button, 3, 0)
-        self.import_curseforge_button = QPushButton("CurseForge pack")
-        self.import_curseforge_button.setObjectName("importCurseForgeButton")
-        self.import_curseforge_button.clicked.connect(self._import_curseforge_pack)
-        install_tools.addWidget(self.import_curseforge_button, 1, 1)
+        install_tools.addWidget(self.install_optifine_button, 1, 0, 1, 2)
+
+        tools.addWidget(rule())
+        tools.addWidget(set_role(QLabel("Files and troubleshooting"), "sectionTitle"))
+        self.open_screenshots_button = QPushButton("Open screenshots")
+        self.open_screenshots_button.setObjectName("openScreenshotsButton")
+        self.open_screenshots_button.clicked.connect(self._open_instance_screenshots)
+        self.open_screenshots_button.setEnabled(False)
+        self.save_log_button = QPushButton("Save log")
+        self.save_log_button.setObjectName("saveDiagnosticLogButton")
+        self.save_log_button.setToolTip("Save a diagnostic log to share when asking for help")
+        self.save_log_button.clicked.connect(self._save_diagnostic_log)
+        self.save_log_button.setEnabled(False)
+        self._instance_quick_row = QHBoxLayout()
+        self._instance_quick_row.setSpacing(8)
+        self._instance_quick_row.addWidget(self.open_screenshots_button)
+        self._instance_quick_row.addWidget(self.save_log_button)
+        tools.addLayout(self._instance_quick_row)
         tools.addStretch(1)
         legacy_panel.setMaximumWidth(1160)
         instances_page = QWidget(root)
@@ -532,17 +618,25 @@ class LauncherWindow(QMainWindow):
         instances_page_layout.setContentsMargins(0, 0, 0, 0)
         instances_page_layout.addWidget(legacy_panel)
         self.content_stack.addWidget(instances_page)
+
+        # ── Modpacks: search online, or import a file you already have ─────
         browse_panel = QWidget(root)
         browse_layout = QVBoxLayout(browse_panel)
-        browse_layout.setContentsMargins(24, 18, 24, 12)
-        browse_layout.setSpacing(12)
-        browse_layout.addWidget(set_role(QLabel("Modpacks", browse_panel), "pageTitle"))
-        browse_layout.addWidget(set_role(QLabel("Search Modrinth and install a pack as a new setup.", browse_panel), "muted"))
+        browse_layout.setContentsMargins(24, 16, 24, 12)
+        browse_layout.setSpacing(10)
+        browse_heading = set_role(QLabel("Modpacks", browse_panel), "pageTitle")
+        browse_heading.setObjectName("browseHeading")
+        browse_layout.addWidget(browse_heading)
+        browse_layout.addWidget(set_role(QLabel(
+            "Search Modrinth and install a pack as a new setup, or import a pack file you already have.",
+            browse_panel), "muted"))
         browse_search_row = QHBoxLayout()
         browse_search_row.setSpacing(8)
         self.modrinth_search_input = QLineEdit(browse_panel)
         self.modrinth_search_input.setObjectName("modrinthSearchInput")
         self.modrinth_search_input.setPlaceholderText("Search modpacks, e.g. Fabulously Optimized")
+        self.modrinth_search_input.setAccessibleName("Search Modrinth modpacks")
+        self.modrinth_search_input.setClearButtonEnabled(True)
         self.modrinth_search_input.returnPressed.connect(self._search_modrinth_catalog)
         self.modrinth_search_button = QPushButton("Search", browse_panel)
         self.modrinth_search_button.setObjectName("modrinthSearchButton")
@@ -553,29 +647,45 @@ class LauncherWindow(QMainWindow):
         browse_layout.addLayout(browse_search_row)
         browse_body = QHBoxLayout()
         browse_body.setSpacing(16)
-        self.modrinth_pack_list = QListWidget(browse_panel)
+        self.modrinth_pack_list = ui.PlaceholderList(browse_panel)
         self.modrinth_pack_list.setObjectName("modrinthPackList")
+        self.modrinth_pack_list.setAccessibleName("Modpack search results")
+        self.modrinth_pack_list.setMinimumHeight(150)
+        self.modrinth_pack_list.set_placeholder(
+            "Find a modpack", "Type a name above and press Search. Results from Modrinth appear here.")
         self.modrinth_pack_list.currentItemChanged.connect(self._select_modrinth_catalog_pack)
+        self.modrinth_pack_list.setItemDelegate(RowDelegate(lambda _value, text: RowInfo(text), self.modrinth_pack_list))
+        self.modrinth_pack_list.setMouseTracking(True)
         browse_body.addWidget(self.modrinth_pack_list, 1)
         details_card = QFrame(browse_panel)
         set_role(details_card, "card")
         details = QVBoxLayout(details_card)
         details.setContentsMargins(18, 16, 18, 16)
-        details.setSpacing(10)
-        self.modrinth_pack_details = QLabel("Pick a pack to see what it includes.", browse_panel)
+        details.setSpacing(8)
+        self.modrinth_pack_details = QLabel(PACK_DETAILS_PROMPT, browse_panel)
         self.modrinth_pack_details.setObjectName("modrinthPackDetails")
         self.modrinth_pack_details.setWordWrap(True)
         details.addWidget(self.modrinth_pack_details)
+        self._catalog_release_section = QWidget(details_card)
+        self._catalog_release_section.setObjectName("cardBody")
+        release_layout = QVBoxLayout(self._catalog_release_section)
+        release_layout.setContentsMargins(0, 4, 0, 0)
+        release_layout.setSpacing(6)
+        release_label = set_role(QLabel("Release", browse_panel), "sectionTitle")
+        release_layout.addWidget(release_label)
         self.modrinth_release_selector = QComboBox(browse_panel)
         self.modrinth_release_selector.setObjectName("modrinthReleaseSelector")
-        details.addWidget(self.modrinth_release_selector)
-        details.addWidget(set_role(QLabel("Release", browse_panel), "sectionTitle"))
+        self.modrinth_release_selector.setAccessibleName("Modpack release")
+        release_label.setBuddy(self.modrinth_release_selector)
+        release_layout.addWidget(self.modrinth_release_selector)
         self.modrinth_install_button = QPushButton("Install as new setup", browse_panel)
         set_role(self.modrinth_install_button, "primary")
         self.modrinth_install_button.setObjectName("modrinthInstallButton")
         self.modrinth_install_button.setEnabled(False)
         self.modrinth_install_button.clicked.connect(self._install_modrinth_catalog_release)
-        details.addWidget(self.modrinth_install_button)
+        release_layout.addWidget(self.modrinth_install_button)
+        self._catalog_release_section.hide()
+        details.addWidget(self._catalog_release_section)
         self.modrinth_catalog_status = QLabel("", browse_panel)
         self.modrinth_catalog_status.setObjectName("modrinthCatalogStatus")
         self.modrinth_catalog_status.setWordWrap(True)
@@ -583,70 +693,96 @@ class LauncherWindow(QMainWindow):
         details.addStretch(1)
         browse_body.addWidget(details_card, 1)
         browse_layout.addLayout(browse_body, 1)
+        pack_file_row = QHBoxLayout()
+        pack_file_row.setSpacing(8)
+        pack_file_row.addWidget(set_role(QLabel("Have a pack file?", browse_panel), "muted"))
+        self.browse_import_modrinth_button = QPushButton("Import .mrpack", browse_panel)
+        self.browse_import_modrinth_button.setObjectName("browseImportModrinthButton")
+        self.browse_import_modrinth_button.clicked.connect(self._import_modrinth_pack)
+        self.browse_import_curseforge_button = QPushButton("Import CurseForge .zip", browse_panel)
+        self.browse_import_curseforge_button.setObjectName("browseImportCurseForgeButton")
+        self.browse_import_curseforge_button.clicked.connect(self._import_curseforge_pack)
+        pack_file_row.addWidget(self.browse_import_modrinth_button)
+        pack_file_row.addWidget(self.browse_import_curseforge_button)
+        pack_file_row.addStretch(1)
+        browse_layout.addLayout(pack_file_row)
         browse_scroll = QScrollArea(root)
         browse_scroll.setWidgetResizable(True)
         browse_scroll.setFrameShape(QFrame.Shape.NoFrame)
         browse_scroll.setWidget(browse_panel)
         self.content_stack.addWidget(browse_scroll)
+
+        # ── Mods: a sub-page of the selected instance ──────────────────────
+        # Two mutually exclusive tasks — review what is installed, or find
+        # something new — so each one gets the whole first viewport.
         mods_panel = QWidget(root)
         mods_layout = QVBoxLayout(mods_panel)
-        mods_layout.setContentsMargins(24, 18, 24, 12)
-        mods_layout.setSpacing(10)
+        mods_layout.setContentsMargins(24, 6, 24, 10)
+        mods_layout.setSpacing(6)
+        self.mods_back_button = QPushButton("‹  Back to Instances", mods_panel)
+        self.mods_back_button.setObjectName("modsBackButton")
+        set_role(self.mods_back_button, "back")
+        self.mods_back_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mods_back_button.clicked.connect(lambda: self._show_page(1))
+        mods_layout.addWidget(self.mods_back_button, 0, Qt.AlignmentFlag.AlignLeft)
+        mods_header = QHBoxLayout()
+        mods_header.setSpacing(12)
         mods_heading = QLabel("Mods", mods_panel)
         mods_heading.setObjectName("modsHeading")
         set_role(mods_heading, "pageTitle")
-        mods_layout.addWidget(mods_heading)
+        mods_header.addWidget(mods_heading)
+        mods_header.addStretch(1)
+        self.mods_installed_mode_button = QPushButton("Installed", mods_panel)
+        self.mods_installed_mode_button.setObjectName("modsInstalledModeButton")
+        self.mods_find_mode_button = QPushButton("Find mods", mods_panel)
+        self.mods_find_mode_button.setObjectName("modsFindModeButton")
+        self.mods_find_mode_button.setAccessibleName("Find mods")
+        self._mods_mode_group = QButtonGroup(mods_panel)
+        self._mods_mode_group.setExclusive(True)
+        for position, (mode, button) in enumerate((("installed", self.mods_installed_mode_button),
+                                                    ("find", self.mods_find_mode_button))):
+            set_role(button, "segment")
+            button.setProperty("segment", "first" if position == 0 else "last")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, mode=mode: self._set_mods_mode(mode))
+            self._mods_mode_group.addButton(button)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(0)
+        mode_row.addWidget(self.mods_installed_mode_button)
+        mode_row.addWidget(self.mods_find_mode_button)
+        mods_header.addLayout(mode_row)
+        mods_layout.addLayout(mods_header)
         self.mods_instance_label = QLabel("Select an instance to manage its mods.", mods_panel)
         self.mods_instance_label.setObjectName("modsInstanceLabel")
         mods_layout.addWidget(self.mods_instance_label)
-        self.mods_warning_label = QLabel(mods_panel)
+        self.mods_warning_label = ui.HintLabel(mods_panel)
         self.mods_warning_label.setObjectName("modsWarningLabel")
-        self.mods_warning_label.setWordWrap(True)
         mods_layout.addWidget(self.mods_warning_label)
-        mods_layout.addWidget(set_role(QLabel("Add from Modrinth", mods_panel), "sectionTitle"))
-        mod_search_row = QHBoxLayout()
-        mod_search_row.setSpacing(8)
-        self.mod_search_input = QLineEdit(mods_panel)
-        self.mod_search_input.setObjectName("modSearchInput")
-        self.mod_search_input.setPlaceholderText("Search mods for this setup")
-        self.mod_search_input.returnPressed.connect(self._search_modrinth_mods)
-        self.mod_search_button = QPushButton("Search", mods_panel)
-        self.mod_search_button.setObjectName("modSearchButton")
-        self.mod_search_button.clicked.connect(self._search_modrinth_mods)
-        mod_search_row.addWidget(self.mod_search_input, 1)
-        mod_search_row.addWidget(self.mod_search_button)
-        mods_layout.addLayout(mod_search_row)
-        self.mod_search_results = QListWidget(mods_panel)
-        self.mod_search_results.setObjectName("modSearchResults")
-        self.mod_search_results.currentItemChanged.connect(self._select_modrinth_mod)
-        mods_layout.addWidget(self.mod_search_results)
-        self.mod_release_selector = QComboBox(mods_panel)
-        self.mod_release_selector.setObjectName("modReleaseSelector")
-        mods_layout.addWidget(self.mod_release_selector)
-        self.mod_install_button = QPushButton("Add mod", mods_panel)
-        set_role(self.mod_install_button, "primary")
-        self.mod_install_button.setObjectName("modInstallButton")
-        self.mod_install_button.setEnabled(False)
-        self.mod_install_button.clicked.connect(self._install_selected_modrinth_mod)
-        mods_layout.addWidget(self.mod_install_button)
-        self.mod_search_status = QLabel("", mods_panel)
-        self.mod_search_status.setObjectName("modSearchStatus")
-        self.mod_search_status.setWordWrap(True)
-        mods_layout.addWidget(self.mod_search_status)
-        mods_layout.addWidget(rule(mods_panel))
-        mods_layout.addWidget(set_role(QLabel("Installed mods", mods_panel), "sectionTitle"))
-        self.mods_list = QListWidget(mods_panel)
+        self.mods_mode_stack = QStackedWidget(mods_panel)
+        self.mods_mode_stack.setObjectName("modsModeStack")
+        mods_layout.addWidget(self.mods_mode_stack, 1)
+
+        # Installed mode: the list and what you can do with a listed mod.
+        installed_page = QWidget(self.mods_mode_stack)
+        installed_layout = QVBoxLayout(installed_page)
+        installed_layout.setContentsMargins(0, 4, 0, 0)
+        installed_layout.setSpacing(8)
+        self.mods_list = ui.PlaceholderList(installed_page)
         self.mods_list.setObjectName("modsList")
+        self.mods_list.setAccessibleName("Installed mods")
+        self.mods_list.setMinimumHeight(72)
+        self.mods_list.set_preferred_height(140)
         self.mods_list.currentRowChanged.connect(lambda _row: self._refresh_mod_buttons())
-        mods_layout.addWidget(self.mods_list, 1)
+        installed_layout.addWidget(self.mods_list, 1)
         mods_actions = QHBoxLayout()
-        self.import_mod_button = QPushButton("Add jar from disk", mods_panel)
+        self.import_mod_button = QPushButton("Add jar from disk", installed_page)
         self.import_mod_button.setObjectName("importModButton")
         self.import_mod_button.clicked.connect(self._import_local_mod)
-        self.toggle_mod_button = QPushButton("Disable selected", mods_panel)
+        self.toggle_mod_button = QPushButton("Disable selected", installed_page)
         self.toggle_mod_button.setObjectName("toggleModButton")
         self.toggle_mod_button.clicked.connect(self._toggle_selected_mod)
-        self.remove_mod_button = QPushButton("Remove selected", mods_panel)
+        self.remove_mod_button = QPushButton("Remove selected", installed_page)
         self.remove_mod_button.setObjectName("removeModButton")
         self.remove_mod_button.clicked.connect(self._remove_selected_mod)
         set_role(self.remove_mod_button, "danger")
@@ -654,25 +790,174 @@ class LauncherWindow(QMainWindow):
         mods_actions.addWidget(self.toggle_mod_button)
         mods_actions.addStretch(1)
         mods_actions.addWidget(self.remove_mod_button)
-        mods_layout.addLayout(mods_actions)
+        installed_layout.addLayout(mods_actions)
+        self.mods_mode_stack.addWidget(installed_page)
+
+        # Find mode: vanilla setups get one truthful state with ways forward
+        # instead of a disabled search that still says "Search for mods".
+        find_page = QWidget(self.mods_mode_stack)
+        find_layout = QVBoxLayout(find_page)
+        find_layout.setContentsMargins(0, 4, 0, 0)
+        find_layout.setSpacing(8)
+        self.mods_vanilla_notice = QFrame(find_page)
+        self.mods_vanilla_notice.setObjectName("modsVanillaNotice")
+        notice_layout = QVBoxLayout(self.mods_vanilla_notice)
+        notice_layout.setContentsMargins(18, 12, 18, 12)
+        notice_layout.setSpacing(6)
+        self.mods_vanilla_title = QLabel("Online mods need a mod loader", self.mods_vanilla_notice)
+        self.mods_vanilla_title.setObjectName("modsVanillaTitle")
+        self.mods_vanilla_detail = QLabel("", self.mods_vanilla_notice)
+        self.mods_vanilla_detail.setObjectName("modsVanillaDetail")
+        self.mods_vanilla_detail.setWordWrap(True)
+        notice_layout.addWidget(self.mods_vanilla_title)
+        notice_layout.addWidget(self.mods_vanilla_detail)
+        notice_actions = QHBoxLayout()
+        notice_actions.setSpacing(8)
+        self.mods_switch_setup_button = QPushButton("", self.mods_vanilla_notice)
+        self.mods_switch_setup_button.setObjectName("modsSwitchSetupButton")
+        set_role(self.mods_switch_setup_button, "primary")
+        self.mods_switch_setup_button.clicked.connect(self._switch_to_modded_setup)
+        self.mods_browse_packs_button = QPushButton("Find a modded pack", self.mods_vanilla_notice)
+        self.mods_browse_packs_button.setObjectName("modsBrowsePacksButton")
+        self.mods_browse_packs_button.clicked.connect(lambda: self._show_page(2))
+        notice_actions.addWidget(self.mods_switch_setup_button)
+        notice_actions.addWidget(self.mods_browse_packs_button)
+        notice_actions.addStretch(1)
+        notice_layout.addLayout(notice_actions)
+        self.mods_vanilla_notice.hide()
+        find_layout.addWidget(self.mods_vanilla_notice)
+        self._mods_online_section = QWidget(find_page)
+        online_layout = QVBoxLayout(self._mods_online_section)
+        online_layout.setContentsMargins(0, 0, 0, 0)
+        online_layout.setSpacing(8)
+        mod_search_row = QHBoxLayout()
+        mod_search_row.setSpacing(8)
+        self.mod_search_input = QLineEdit(find_page)
+        self.mod_search_input.setObjectName("modSearchInput")
+        self.mod_search_input.setPlaceholderText("Search Modrinth for this setup, e.g. Sodium")
+        self.mod_search_input.setAccessibleName("Search Modrinth mods")
+        self.mod_search_input.setClearButtonEnabled(True)
+        self.mod_search_input.returnPressed.connect(self._search_modrinth_mods)
+        self.mod_search_button = QPushButton("Search", find_page)
+        self.mod_search_button.setObjectName("modSearchButton")
+        self.mod_search_button.clicked.connect(self._search_modrinth_mods)
+        mod_search_row.addWidget(self.mod_search_input, 1)
+        mod_search_row.addWidget(self.mod_search_button)
+        online_layout.addLayout(mod_search_row)
+        self.mod_search_results = ui.PlaceholderList(find_page)
+        self.mod_search_results.setObjectName("modSearchResults")
+        self.mod_search_results.setAccessibleName("Mod search results")
+        self.mod_search_results.setMinimumHeight(60)
+        self.mod_search_results.set_preferred_height(72)
+        self.mod_search_results.currentItemChanged.connect(self._select_modrinth_mod)
+        self.mod_search_results.setItemDelegate(RowDelegate(lambda _value, text: RowInfo(text), self.mod_search_results))
+        self.mod_search_results.setMouseTracking(True)
+        online_layout.addWidget(self.mod_search_results, 1)
+        self._mod_release_section = QWidget(find_page)
+        mod_release_layout = QHBoxLayout(self._mod_release_section)
+        mod_release_layout.setContentsMargins(0, 0, 0, 0)
+        mod_release_layout.setSpacing(8)
+        self.mod_release_selector = QComboBox(find_page)
+        self.mod_release_selector.setObjectName("modReleaseSelector")
+        self.mod_release_selector.setAccessibleName("Mod release")
+        self.mod_install_button = QPushButton("Add mod", find_page)
+        set_role(self.mod_install_button, "primary")
+        self.mod_install_button.setObjectName("modInstallButton")
+        self.mod_install_button.setEnabled(False)
+        self.mod_install_button.clicked.connect(self._install_selected_modrinth_mod)
+        mod_release_layout.addWidget(self.mod_release_selector, 1)
+        mod_release_layout.addWidget(self.mod_install_button)
+        self._mod_release_section.hide()
+        online_layout.addWidget(self._mod_release_section)
+        find_layout.addWidget(self._mods_online_section, 1)
+        # Search and install feedback belongs to the find task.
+        self.mod_search_status = ui.HintLabel(find_page)
+        self.mod_search_status.setObjectName("modSearchStatus")
+        find_layout.addWidget(self.mod_search_status)
+        # Keeps the vanilla notice at the top when the search is hidden.
+        find_layout.addStretch(0)
+        self.mods_mode_stack.addWidget(find_page)
         mods_scroll = QScrollArea(root)
+        mods_scroll.setObjectName("modsScroll")
         mods_scroll.setWidgetResizable(True)
         mods_scroll.setFrameShape(QFrame.Shape.NoFrame)
         mods_scroll.setWidget(mods_panel)
         self.content_stack.addWidget(mods_scroll)
         self.mods_panel = mods_panel
+        self._set_mods_mode("find")
+        # Release choices appear once there is something to choose.
+        self.modrinth_release_selector.model().rowsInserted.connect(lambda *_: self._refresh_release_sections())
+        self.modrinth_release_selector.model().modelReset.connect(self._refresh_release_sections)
+        self.modrinth_release_selector.model().rowsRemoved.connect(lambda *_: self._refresh_release_sections())
+        self.mod_release_selector.model().rowsInserted.connect(lambda *_: self._refresh_release_sections())
+        self.mod_release_selector.model().modelReset.connect(self._refresh_release_sections)
+        self.mod_release_selector.model().rowsRemoved.connect(lambda *_: self._refresh_release_sections())
         layout.addWidget(self.content_stack, 1)
         layout.addWidget(launch_bar)
         self.setCentralWidget(root)
         self._apply_compact_theme()
+        self._density = None
+        self._apply_density()
         self._show_page(0)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._apply_density()
+
+    def _apply_density(self) -> None:
+        """Fit the first fold of the supported 680×420 window.
+
+        Narrow: the launch strip gives the version picker room for an ordinary
+        name and version line. Compact: the library folds its two pack imports
+        into one menu so the list keeps room for whole rows.
+        """
+        if self.content_stack is None or not hasattr(self, "import_pack_menu_button"):
+            return
+        narrow = self.width() < 780
+        compact = narrow or self.height() < 500
+        if getattr(self, "_density", None) == (narrow, compact):
+            return
+        self._density = (narrow, compact)
+        self.open_folder_button.setText("Folder" if narrow else "Open folder")
+        self.open_folder_button.setAccessibleName("Open folder")
+        self.open_folder_button.setMinimumWidth(88 if narrow else 120)
+        self.play_button.setMinimumWidth(150 if narrow else 170)
+        self.username_input.setMinimumWidth(112 if narrow else 130)
+        self._new_setup_title.setVisible(not compact)
+        self.import_modpack_button.setVisible(not compact)
+        self.import_curseforge_button.setVisible(not compact)
+        self.import_pack_menu_button.setVisible(compact)
+        # Without its "New setup" heading the input's placeholder is its label,
+        # so it must stay whole.
+        name_input = self.instance_name_input
+        name_input.setPlaceholderText("New setup" if compact else "New setup name")
+        name_input.setMinimumWidth(name_input.fontMetrics().horizontalAdvance(name_input.placeholderText()) + 34)
+        self._fit_library_column()
+
+    def _fit_library_column(self) -> None:
+        """The library never scrolls sideways, so its column must be at least
+        as wide as its content; otherwise list rows and badges are clipped."""
+        panel = self._library_scroll.widget()
+        # Showing/hiding the import controls only invalidates the top layout;
+        # activate() re-measures the nested rows before we read the minimum.
+        panel.layout().activate()
+        self._library_scroll.setMinimumWidth(max(
+            260, panel.minimumSizeHint().width() + self._library_scroll.verticalScrollBar().sizeHint().width()))
+        # Apply now rather than on the next pass, so the columns never overlap.
+        self.instances_panel.layout().activate()
+
+    def _refresh_release_sections(self) -> None:
+        self._catalog_release_section.setVisible(self.modrinth_release_selector.count() > 0)
+        self._mod_release_section.setVisible(self.mod_release_selector.count() > 0)
 
     def _apply_compact_theme(self) -> None:
         self.resize(920, 560)
         self.setMinimumSize(680, 420)
         self.setStyleSheet(ui.STYLESHEET)
+        ui.apply_palette(self)
         # Top-level popups and dialogs do not inherit the window stylesheet.
         self.setup_selector.popup.setStyleSheet(ui.STYLESHEET)
+        ui.apply_palette(self.setup_selector.popup)
         self.save_username_button.hide()
         self.save_memory_button.hide()
         self.identity_label.hide()
@@ -688,14 +973,25 @@ class LauncherWindow(QMainWindow):
             return
         index = 0 if index not in (0, 1, 2, 3) else index
         self.content_stack.setCurrentIndex(index)
-        # Instances already provides selection; keep more space for its tools.
+        home = index == 0
+        # Home owns the launch form; other pages keep a one-line launch strip
+        # whose status explains what the (quieter) Play button would start.
         for control in (self.username_field_label, self.setup_field_label,
                         self.username_input, self.setup_selector):
-            control.setVisible(index == 0)
-        if index != 0:
+            control.setVisible(home)
+        if not home:
             self.setup_selector.hidePopup()
-        self.home_nav_button.setProperty("active", index == 0)
-        self.instances_nav_button.setProperty("active", index == 1)
+        self._place_status_label(home)
+        strip_height = 52 if home else 48
+        self.play_button.setMinimumHeight(strip_height)
+        self.open_folder_button.setMinimumHeight(strip_height)
+        self._launch_layout.setContentsMargins(20, 10 if home else 8, 20, 12 if home else 8)
+        self.play_button.setProperty("subdued", not home)
+        self.play_button.style().unpolish(self.play_button)
+        self.play_button.style().polish(self.play_button)
+        self.home_nav_button.setProperty("active", home)
+        # Mods belongs to the selected instance, so Instances stays highlighted.
+        self.instances_nav_button.setProperty("active", index in (1, 3))
         self.browse_nav_button.setProperty("active", index == 2)
         self.mods_nav_button.setProperty("active", index == 3)
         for button in (self.home_nav_button, self.instances_nav_button, self.browse_nav_button, self.mods_nav_button):
@@ -703,6 +999,26 @@ class LauncherWindow(QMainWindow):
             button.style().polish(button)
         if index == 3:
             self._refresh_mods_panel()
+
+    def _place_status_label(self, home: bool) -> None:
+        label = self.instance_status_label
+        self._launch_layout.removeWidget(label)
+        self._launch_controls.removeWidget(label)
+        if home:
+            # Directly above the hint row, which sits just before the progress bar.
+            row = max(0, self._launch_layout.indexOf(self.install_progress) - 1)
+            self._launch_layout.insertWidget(row, label)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        else:
+            self._launch_controls.addWidget(label, 1, 0, 1, 2)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._refresh_status_visibility()
+
+    def _refresh_status_visibility(self) -> None:
+        label = self.instance_status_label
+        on_home = self.content_stack is not None and self.content_stack.currentIndex() == 0
+        # On Home the hero already says what is selected; only news shows here.
+        label.setVisible(bool(label.text()) and not (on_home and label.is_summary))
 
     def _describe_instance(self, instance: dict) -> RowInfo:
         version = instance.get("minecraft_version") or instance.get("version")
@@ -740,18 +1056,67 @@ class LauncherWindow(QMainWindow):
         instance = next((item for item in self.state.get("instances", []) if item.get("id") == value), None)
         return self._describe_instance(instance) if instance is not None else RowInfo(text)
 
+    def _set_hero(self, eyebrow: str, title: str, detail: str, tone: str = "") -> None:
+        self.hero_eyebrow.setText(eyebrow)
+        self.hero_eyebrow.setVisible(bool(eyebrow))
+        if self.hero_eyebrow.property("tone") != tone:
+            self.hero_eyebrow.setProperty("tone", tone)
+            self.hero_eyebrow.style().unpolish(self.hero_eyebrow)
+            self.hero_eyebrow.style().polish(self.hero_eyebrow)
+        self.hero_title.setText(title)
+        self.hero_detail.setText(detail)
+
     def _refresh_hero(self) -> None:
+        """Explain, in plain words, what Play will do right now."""
         if not hasattr(self, "hero_title"):
             return
         index = self.setup_selector.currentIndex()
         value = self.setup_selector.itemData(index, Qt.ItemDataRole.UserRole) if index >= 0 else None
+        name = str(self.state.get("username") or "").strip()
+        first_run = not self.state.get("instances")
         if value is None:
-            self.hero_title.setText("Pick something to play")
-            self.hero_detail.setText("Choose a Minecraft version or one of your setups below.")
+            if getattr(self, "_discovery_error", ""):
+                self._set_hero(
+                    "Version list unavailable", "Couldn’t reach Minecraft’s version list",
+                    "Check your connection and press Retry below. Setups you already created still work.", "bad")
+            elif first_run and self.setup_selector.count() == 0:
+                # Say what is happening now, then the one next step.
+                self._set_hero(
+                    "Welcome", "Getting the version list…",
+                    "Fetching Minecraft versions from Mojang. Then pick a version below, or press "
+                    "Install & Play to download and start the newest release.", "muted")
+            elif first_run:
+                self._set_hero("Welcome", "Pick a version to start",
+                               "Choose a Minecraft version below, then press Install & Play.", "muted")
+            else:
+                self._set_hero("Choose what to play", "Nothing selected",
+                               "Pick a Minecraft version or one of your setups below.", "muted")
+            self.setup_selector.setToolTip("Choose a version or setup")
+            self.setup_selector.update()
             return
         info = self._describe_row(value, self.setup_selector.itemText(index))
-        self.hero_title.setText(info.title)
-        self.hero_detail.setText(info.detail + (f" · {info.badge}" if info.badge else ""))
+        # The compact picker may show the state as a dot; the tooltip says it.
+        self.setup_selector.setToolTip(" · ".join(part for part in (info.title, info.detail, info.badge) if part))
+        greeting = f"Welcome back, {name}" if name and not first_run else ("Welcome" if first_run else "")
+        if isinstance(value, str) and value.startswith("version:"):
+            if info.badge == "Installed":
+                self._set_hero(greeting or "Ready to play", info.title,
+                               f"{info.detail} · Downloaded and ready. Press Play to start.", "")
+            else:
+                self._set_hero(greeting or "Ready to install", info.title,
+                               f"{info.detail} · Not downloaded yet. Install & Play downloads it "
+                               "(a few hundred MB, one time) and then starts the game.", "")
+        else:
+            instance = next((item for item in self.state.get("instances", []) if item.get("id") == value), None) or {}
+            if info.tone == "warn":
+                self._set_hero("Needs attention", info.title,
+                               f"{info.detail} · {instance.get('install_error') or 'The last install did not finish'}. "
+                               "Press Retry to try again.", "warn")
+            elif info.badge == "Ready":
+                self._set_hero(greeting or "Ready to play", info.title, f"{info.detail} · Ready. Press Play to start.", "")
+            else:
+                self._set_hero(greeting or "Ready to install", info.title,
+                               f"{info.detail} · Not installed yet. Install & Play downloads it and then starts the game.", "")
         self.setup_selector.update()
 
     def _choose_background(self) -> None:
@@ -794,7 +1159,7 @@ class LauncherWindow(QMainWindow):
             if not getattr(self, "_restoring_state", False) and not self.store.recovery_required:
                 self.store.save(self.state)
             self.instance_list.setCurrentRow(-1)
-            self.instance_status_label.setText(f"Minecraft {version} selected")
+            self.instance_status_label.set_summary(f"Minecraft {version} selected")
             self.diagnostic_hint_label.clear()
             self._refresh_play_button()
             self._preserve_lifecycle_status()
@@ -813,9 +1178,16 @@ class LauncherWindow(QMainWindow):
                 self.state["selected_setup_id"] = instance["id"]
                 self.store.save(self.state)
 
-    def _start_version_discovery(self) -> None:
-        if not self._installer_injected and QApplication.platformName() == "offscreen":
+    def _retry_version_discovery(self) -> None:
+        if self.discovery_worker is not None:
             return
+        self.retry_discovery_button.hide()
+        if self._start_version_discovery():
+            self.diagnostic_hint_label.setText("Checking for Minecraft versions again…")
+
+    def _start_version_discovery(self) -> bool:
+        if not self._installer_injected and QApplication.platformName() == "offscreen":
+            return False
         first_use = not self.state.get("instances") and not self.state.get("selected_setup_id")
         self.discovery_worker = VersionDiscoveryWorker(self.installer, select_latest=first_use)
         _ACTIVE_DISCOVERY_WORKERS.add(self.discovery_worker)
@@ -824,6 +1196,7 @@ class LauncherWindow(QMainWindow):
         self.discovery_worker.finished.connect(self._discovery_finished)
         self.discovery_worker.finished.connect(lambda worker=self.discovery_worker: _release_discovery_worker(worker))
         self.discovery_worker.start()
+        return True
 
     def _versions_discovered(self, versions: list) -> None:
         metadata = [
@@ -848,11 +1221,31 @@ class LauncherWindow(QMainWindow):
             self.store.save(self.state)
         selected = self.state.get("selected_setup_id") or self.state.get("selected_instance_id")
         self._rebuild_setup_selector(selected=selected)
+        if getattr(self, "_discovery_error", ""):
+            self._discovery_error = ""
+            self.retry_discovery_button.hide()
+            self.diagnostic_hint_label.clear()
+        elif self.diagnostic_hint_label.text().startswith("Checking for Minecraft versions"):
+            self.diagnostic_hint_label.clear()
+        # The selector was rebuilt quietly, so restate what is now selected.
+        version = self._selected_version()
+        if version and self._selected_instance() is None and (
+            self.instance_status_label.is_summary and self.game_process is None
+        ):
+            self.instance_status_label.set_summary(f"Minecraft {version} selected")
         self._refresh_play_button()
+        self._refresh_hero()
 
     def _version_discovery_failed(self, message: str) -> None:
-        self.diagnostic_hint_label.setText(f"Could not discover Minecraft releases: {message}")
+        self._discovery_error = message
+        cached = bool(self.state.get("available_versions")) or bool(self.state.get("instances"))
+        self.diagnostic_hint_label.setText(
+            f"Could not discover Minecraft releases: {message}. "
+            + ("Your saved setups and cached versions still work." if cached else "Check your connection, then retry.")
+        )
+        self.retry_discovery_button.show()
         self._refresh_play_button()
+        self._refresh_hero()
 
     def _discovery_finished(self) -> None:
         worker = self.discovery_worker
@@ -862,50 +1255,131 @@ class LauncherWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
         dialog.setModal(True)
-        form = QFormLayout(dialog)
+        dialog.setMinimumWidth(440)
+        dialog.setStyleSheet(ui.STYLESHEET)
+        ui.apply_palette(dialog)
+        # Sections scroll inside a dialog that never outgrows the smallest
+        # supported window (420 px); Close stays pinned below them.
+        outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(0, 0, 0, 14)
+        outer.setSpacing(8)
+        body = QWidget(dialog)
+        body.setObjectName("settingsBody")
+        page = QVBoxLayout(body)
+        page.setContentsMargins(22, 14, 22, 4)
+        page.setSpacing(6)
+        scroll = QScrollArea(dialog)
+        scroll.setObjectName("settingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+        intro = set_role(QLabel("Changes are saved automatically.", dialog), "muted")
+        intro.setObjectName("settingsSavedNote")
+        page.addWidget(intro)
+
+        def section(title: str) -> QFormLayout:
+            page.addWidget(set_role(QLabel(title, dialog), "sectionTitle"))
+            form = QFormLayout()
+            form.setHorizontalSpacing(14)
+            form.setVerticalSpacing(6)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            page.addLayout(form)
+            return form
+
+        # Game
+        game = section("Game")
+        maximum = whole_physical_memory_gib()
         memory = QLineEdit(str(self.state.get("memory_gib", default_memory_gib())), dialog)
         memory.setObjectName("settingsMemoryInput")
+        memory.setAccessibleName("Game memory in GiB")
+        memory.setMaximumWidth(90)
+        memory_row = QHBoxLayout()
+        memory_row.setSpacing(8)
+        memory_row.addWidget(memory)
+        memory_row.addWidget(QLabel("GiB", dialog))
+        memory_row.addStretch(1)
+        memory_label = QLabel("Memory", dialog)
+        memory_label.setBuddy(memory)
+        game.addRow(memory_label, memory_row)
+        memory_hint = set_role(QLabel(
+            f"Whole number from 1 to {maximum} GiB (this computer’s RAM). "
+            f"{default_memory_gib()} GiB suits most setups.", dialog), "muted")
+        memory_hint.setObjectName("settingsMemoryHint")
+        memory_hint.setWordWrap(True)
+        game.addRow("", memory_hint)
         error = QLabel(dialog)
         error.setObjectName("settingsError")
-        dialog.setStyleSheet(ui.STYLESHEET)
         error.setWordWrap(True)
         error.hide()
-        form.addRow("Game memory (GiB)", memory)
-        form.addRow("", error)
+        game.addRow("", error)
+
+        # Versions
+        versions = section("Versions")
         snapshots = QCheckBox("Show snapshots", dialog)
         snapshots.setChecked(bool(self.state.get("show_snapshots", False)))
-        form.addRow("Experimental versions", snapshots)
+        snapshots.setToolTip("List experimental Minecraft builds in the version picker")
+        versions.addRow("Experimental", snapshots)
+
+        # Appearance
+        appearance = section("Appearance")
         background_button = QPushButton("Choose background", dialog)
         background_button.setObjectName("settingsBackgroundButton")
         background_button.clicked.connect(self._choose_background)
-        form.addRow("Home artwork", background_button)
+        appearance.addRow("Home artwork", background_button)
+
+        # Troubleshooting
+        trouble = section("Troubleshooting")
         lifecycle_target = self.game_instance is not None or self.last_game_instance is not None
         target_label = "running game" if self.game_instance is not None else "last game"
         open_folder_text = f"Open {target_label} folder" if lifecycle_target else "Open selected setup folder"
         log_text = f"Export {target_label} diagnostic log" if lifecycle_target else "Export diagnostic log"
         open_folder = QPushButton(open_folder_text, dialog)
         open_folder.clicked.connect(self._open_instance_folder)
-        form.addRow("", open_folder)
         export_log = QPushButton(log_text, dialog)
+        export_log.setToolTip("Save a log file to share when asking for help")
         export_log.clicked.connect(self._save_diagnostic_log)
-        form.addRow("", export_log)
+        trouble_row = QHBoxLayout()
+        trouble_row.setSpacing(8)
+        trouble_row.addWidget(open_folder)
+        trouble_row.addWidget(export_log)
+        trouble.addRow(trouble_row)
+
+        page.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        buttons.setContentsMargins(22, 0, 22, 0)
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
-        form.addRow(buttons)
+        outer.addWidget(buttons)
+        dialog.setMaximumHeight(400)
+        dialog.resize(440, min(400, body.sizeHint().height() + buttons.sizeHint().height() + 22))
+
+        def mark_invalid(invalid: bool) -> None:
+            memory.setProperty("invalid", invalid)
+            memory_hint.setVisible(not invalid)
+            memory.style().unpolish(memory)
+            memory.style().polish(memory)
 
         def save_memory() -> None:
             if self.store.recovery_required:
                 return
             value, message = validate_memory_gib(memory.text())
             if message:
-                error.setText(message)
+                error.setText(f"{message} (1–{maximum}). Not saved; the game keeps "
+                              f"{self.state.get('memory_gib', default_memory_gib())} GiB.")
                 error.show()
+                mark_invalid(True)
+                memory.setAccessibleDescription(error.text())
+                scroll.ensureWidgetVisible(error)
                 return
             self.state["memory_gib"] = value
             self.store.save(self.state)
             self.memory_input.setText(str(value))
+            memory.setText(str(value))
             error.hide()
+            mark_invalid(False)
+            memory.setAccessibleDescription(memory_hint.text())
 
         def save_snapshots(enabled: bool) -> None:
             if self.store.recovery_required:
@@ -1002,6 +1476,8 @@ class LauncherWindow(QMainWindow):
                 self.setup_selector.setCurrentIndex(selected_index)
                 self.setup_selector.setToolTip(self.setup_selector.itemText(selected_index))
         self._restoring_state = False
+        self._refresh_hero()
+        self._explain_play_state()
         self._restore_running_game()
 
     def _append_cached_versions(self) -> None:
@@ -1255,7 +1731,12 @@ class LauncherWindow(QMainWindow):
         query = self.modrinth_search_input.text().strip()
         if not query:
             self.modrinth_catalog_status.setText("Enter a search term to browse Modrinth modpacks.")
+            self.modrinth_search_input.setFocus()
             return
+        self._catalog_last_query = query
+        self.modrinth_pack_list.clear()
+        self.modrinth_pack_list.set_placeholder("Searching Modrinth…", f"Looking for “{query}”.")
+        self._reset_catalog_details(PACK_DETAILS_PROMPT, f"Searching Modrinth for “{query}”…")
         if not self._catalog_injected:
             self._catalog_browse_request += 1
             if self._catalog_browse_worker is not None and self._catalog_browse_worker.isRunning():
@@ -1271,39 +1752,62 @@ class LauncherWindow(QMainWindow):
         try:
             results = self.modrinth_catalog.search(query)
         except (ModrinthCatalogError, OSError, RuntimeError) as error:
-            self._catalog_results = []
-            self.modrinth_pack_list.clear()
-            self.modrinth_catalog_status.setText(f"Modrinth search failed: {error}")
+            self._show_catalog_search_failure(error)
             return
+        self._show_catalog_results(results)
+
+    def _reset_catalog_details(self, details: str, status: str = "") -> None:
+        """Drop the previous pack's description, releases and Install button.
+
+        A new search, an empty result or a failure must never leave an old
+        pack offered beside results it does not belong to.
+        """
+        self.modrinth_release_selector.clear()
+        self._catalog_releases = []
+        self.modrinth_install_button.setEnabled(False)
+        self.modrinth_pack_details.setText(details)
+        self.modrinth_catalog_status.setText(status)
+
+    def _show_catalog_results(self, results) -> None:
         self._catalog_results = results
         self.modrinth_pack_list.clear()
         for result in results:
-            title = str(result.get("title") or result.get("name") or result.get("slug") or result.get("project_id"))
-            item = QListWidgetItem(title)
-            item.setData(Qt.ItemDataRole.UserRole, result)
-            item.setToolTip(str(result.get("description", "")))
-            self.modrinth_pack_list.addItem(item)
-        self.modrinth_catalog_status.setText(f"{len(results)} Modrinth pack(s) found." if results else "No Modrinth modpacks matched that search.")
+            self.modrinth_pack_list.addItem(self._result_item(result))
+        if results:
+            self._reset_catalog_details(PACK_DETAILS_PROMPT, f"{len(results)} Modrinth pack(s) found.")
+        else:
+            self._reset_catalog_details(
+                "Nothing to install from this search. Try different words, or import a pack file below.",
+                "No Modrinth modpacks matched that search.")
+        self._catalog_placeholder_empty()
+
+    def _show_catalog_search_failure(self, message) -> None:
+        self._catalog_results = []
+        self.modrinth_pack_list.clear()
+        self._reset_catalog_details(
+            "Pack details appear here once Modrinth can be reached. You can still import a pack file below.",
+            f"Modrinth search failed: {message}")
+        self._catalog_placeholder_failed()
 
     def _catalog_search_completed(self, request: int, results) -> None:
         if self._closing or request != self._catalog_browse_request:
             return
-        self._catalog_results = results
-        self.modrinth_pack_list.clear()
-        for result in results:
-            title = str(result.get("title") or result.get("name") or result.get("slug") or result.get("project_id"))
-            item = QListWidgetItem(title)
-            item.setData(Qt.ItemDataRole.UserRole, result)
-            item.setToolTip(str(result.get("description", "")))
-            self.modrinth_pack_list.addItem(item)
-        self.modrinth_catalog_status.setText(f"{len(results)} Modrinth pack(s) found." if results else "No Modrinth modpacks matched that search.")
+        self._show_catalog_results(results)
 
     def _catalog_search_failed(self, request: int, message: str) -> None:
         if self._closing or request != self._catalog_browse_request:
             return
-        self._catalog_results = []
-        self.modrinth_pack_list.clear()
-        self.modrinth_catalog_status.setText(f"Modrinth search failed: {message}")
+        self._show_catalog_search_failure(message)
+
+    def _catalog_placeholder_empty(self) -> None:
+        query = getattr(self, "_catalog_last_query", "")
+        self.modrinth_pack_list.set_placeholder(
+            f"No modpacks match “{query}”", "Try a shorter name or different words.")
+
+    def _catalog_placeholder_failed(self) -> None:
+        self.modrinth_pack_list.set_placeholder(
+            "Couldn’t reach Modrinth", "Check your connection and press Search again. "
+            "You can still import a pack file below.")
 
     def _select_modrinth_catalog_pack(self, current, _previous=None) -> None:
         self.modrinth_release_selector.clear()
@@ -2099,9 +2603,10 @@ class LauncherWindow(QMainWindow):
             self.open_screenshots_button.setEnabled(False)
             self.selected_instance_heading.setText("No setup selected")
             self.selected_instance_description.setText("Pick a setup from the list, or create a new one below it.")
+            self._refresh_install_button()
             if self._preserve_lifecycle_status():
                 return
-            self.instance_status_label.setText("No instance selected")
+            self.instance_status_label.set_summary("No instance selected")
             self.diagnostic_hint_label.clear()
             self.open_folder_button.setEnabled(False)
             self.save_log_button.setEnabled(False)
@@ -2128,12 +2633,12 @@ class LauncherWindow(QMainWindow):
             self.selected_instance_description.setText(self._describe_instance(instance).detail)
         self.save_log_button.setEnabled(instance is not None)
         if instance and instance.get("ready"):
-            self.instance_status_label.setText(f"Ready: {current.text()} ({instance.get('version')})")
+            self.instance_status_label.set_summary(f"Ready: {current.text()} ({instance.get('version')})")
         elif instance and instance.get("install_error"):
             self.instance_status_label.setText(f"Installation failed: {instance['install_error']}")
             self.diagnostic_hint_label.setText("Install Minecraft again to retry this instance.")
         else:
-            self.instance_status_label.setText(f"Selected instance: {current.text()}")
+            self.instance_status_label.set_summary(f"Selected instance: {current.text()}")
             self.diagnostic_hint_label.setText(str(instance.get("last_event", "")))
         self.install_button.setEnabled(self.install_worker is None)
         self._refresh_install_button()
@@ -2144,6 +2649,7 @@ class LauncherWindow(QMainWindow):
         self._preserve_lifecycle_status()
 
     def _search_modrinth_mods(self) -> None:
+        self._set_mods_mode("find")
         instance = self._selected_instance()
         query = self.mod_search_input.text().strip()
         if instance is None:
@@ -2151,6 +2657,7 @@ class LauncherWindow(QMainWindow):
             return
         if not query:
             self.mod_search_status.setText("Enter a mod name or search term.")
+            self.mod_search_input.setFocus()
             return
         game_version = instance.get("minecraft_version") or instance.get("version")
         loader = instance.get("loader")
@@ -2169,6 +2676,9 @@ class LauncherWindow(QMainWindow):
                 self._mod_search_completed(request, instance_id, game_version, loader, results)
             )
             self._mod_query_worker.failed.connect(lambda message, request=request: self._mod_search_failed(request, message))
+            self._mod_last_query = query
+            self.mod_search_results.clear()
+            self.mod_search_results.set_placeholder("Searching Modrinth…", f"Looking for “{query}”.")
             self._mod_query_worker.start()
             return
         try:
@@ -2176,18 +2686,18 @@ class LauncherWindow(QMainWindow):
         except (ModrinthCatalogError, OSError, RuntimeError) as error:
             self.mod_search_results.clear()
             self.mod_search_status.setText(f"Mod search failed: {error}")
+            self._mod_placeholder_failed()
             return
+        self._mod_last_query = query
         self.mod_search_results.clear()
         self.mod_release_selector.clear()
         self.mod_install_button.setEnabled(False)
         for result in results:
-            item = QListWidgetItem(str(result.get("title") or result.get("slug") or result.get("project_id")))
-            item.setData(Qt.ItemDataRole.UserRole, result)
-            item.setToolTip(str(result.get("description", "")))
-            self.mod_search_results.addItem(item)
+            self.mod_search_results.addItem(self._result_item(result))
         self.mod_search_status.setText(
             f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched."
         )
+        self._mod_placeholder_empty()
 
     def _mod_search_completed(self, request, instance_id, game_version, loader, results) -> None:
         if self._closing or request != self._mod_query_request:
@@ -2202,16 +2712,24 @@ class LauncherWindow(QMainWindow):
         self.mod_release_selector.clear()
         self.mod_install_button.setEnabled(False)
         for result in results:
-            item = QListWidgetItem(str(result.get("title") or result.get("slug") or result.get("project_id")))
-            item.setData(Qt.ItemDataRole.UserRole, result)
-            item.setToolTip(str(result.get("description", "")))
-            self.mod_search_results.addItem(item)
+            self.mod_search_results.addItem(self._result_item(result))
         self.mod_search_status.setText(f"{len(results)} compatible Modrinth mod(s) found." if results else "No compatible Modrinth mods matched.")
+        self._mod_placeholder_empty()
 
     def _mod_search_failed(self, request, message: str) -> None:
         if self._closing or request != self._mod_query_request:
             return
         self.mod_search_status.setText(f"Mod search failed: {message}")
+        self._mod_placeholder_failed()
+
+    def _mod_placeholder_empty(self) -> None:
+        self.mod_search_results.set_placeholder(
+            f"No compatible mods match “{getattr(self, '_mod_last_query', '')}”",
+            "Only mods for this setup’s game version and loader are shown.")
+
+    def _mod_placeholder_failed(self) -> None:
+        self.mod_search_results.set_placeholder(
+            "Couldn’t reach Modrinth", "Check your connection and search again, or add a jar from disk.")
 
     def _select_modrinth_mod(self, current, _previous=None) -> None:
         self.mod_release_selector.clear()
@@ -2323,6 +2841,13 @@ class LauncherWindow(QMainWindow):
     _search_mods = _search_modrinth_mods
     _install_selected_mod = _install_selected_modrinth_mod
 
+    def _set_mods_mode(self, mode: str) -> None:
+        """Show one Mods task: "installed" (manage the list) or "find" (search Modrinth)."""
+        find = mode == "find"
+        self.mods_mode_stack.setCurrentIndex(1 if find else 0)
+        self.mods_find_mode_button.setChecked(find)
+        self.mods_installed_mode_button.setChecked(not find)
+
     def _refresh_mods_panel(self) -> None:
         instance = self._selected_instance()
         selected_mod_id = self.mods_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.mods_list.currentItem() else None
@@ -2330,8 +2855,36 @@ class LauncherWindow(QMainWindow):
         if instance is None:
             self.mods_instance_label.setText("Select an instance to manage its mods.")
             self.mods_warning_label.clear()
+            self.mods_list.set_placeholder("No setup selected", "Go back to Instances and pick a setup.")
+            self.mod_search_results.set_placeholder("No setup selected")
+            self.mods_vanilla_notice.hide()
+            self._mods_online_section.show()
+            self.mods_installed_mode_button.setText("Installed")
             self._refresh_mod_buttons()
             return
+        if getattr(self, "_mods_panel_instance_id", None) != instance.get("id"):
+            # Results and releases were filtered to the previous setup's
+            # version and loader; never offer them for this one.
+            self._mods_panel_instance_id = instance.get("id")
+            self.mod_search_results.clear()
+            self.mod_release_selector.clear()
+            self.mod_search_status.clear()
+            # Nothing installed yet: the next step is finding something.
+            self._set_mods_mode("installed" if instance.get("mods") else "find")
+        loader = str(instance.get("loader") or "").strip().lower()
+        modded = bool(loader) and loader != "vanilla"
+        self.mods_list.set_placeholder(
+            "No mods installed yet",
+            "Open Find mods to search Modrinth, or add a .jar you downloaded." if modded
+            else "This setup runs vanilla Minecraft, which doesn’t load mods.")
+        # One truthful state: vanilla swaps the online search for a way forward.
+        self._mods_online_section.setVisible(modded)
+        self.mods_vanilla_notice.setVisible(not modded)
+        if not modded:
+            self._refresh_vanilla_notice(instance)
+        if not self.mod_search_results.count():
+            self.mod_search_results.set_placeholder(
+                "Search for mods", "Results are filtered to this setup’s version and loader.")
         modified = bool(instance.get("modified"))
         self.mods_instance_label.setText(
             f"{instance.get('name', 'Instance')} · {instance.get('version') or 'version not pinned'}"
@@ -2352,15 +2905,73 @@ class LauncherWindow(QMainWindow):
             self.mods_list.addItem(item)
             if selected_mod_id and mod.get("id") == selected_mod_id:
                 self.mods_list.setCurrentItem(item)
+        installed = len(instance.get("mods", []))
+        self.mods_installed_mode_button.setText(f"Installed ({installed})")
+        self.mods_installed_mode_button.setAccessibleName(f"Installed mods, {installed}")
         self._refresh_mod_buttons()
+
+    def _compatible_mod_setup(self, exclude_id: str | None = None) -> dict | None:
+        """First saved setup with a mod loader, for routing away from vanilla."""
+        return next((item for item in self.state.get("instances", [])
+                     if item.get("id") != exclude_id
+                     and str(item.get("loader") or "").strip().lower() not in {"", "vanilla"}), None)
+
+    def _refresh_vanilla_notice(self, instance: dict) -> None:
+        target = self._compatible_mod_setup(instance.get("id"))
+        name = str(instance.get("name") or "This setup")
+        if target is not None:
+            self.mods_vanilla_detail.setText(
+                f"{name} is vanilla Minecraft, which can’t load mods. "
+                f"Switch to {target.get('name')}, which uses {str(target.get('loader')).capitalize()}, "
+                "or install a modded pack.")
+            self.mods_switch_setup_button.setText(f"Switch to {target.get('name')}")
+            self.mods_switch_setup_button.setProperty("targetId", target.get("id"))
+            self.mods_switch_setup_button.show()
+            set_role(self.mods_browse_packs_button, "")
+        else:
+            self.mods_vanilla_detail.setText(
+                f"{name} is vanilla Minecraft, which can’t load mods. Install a modded pack "
+                "(Fabric, Forge, Quilt or NeoForge) from Modpacks to add mods to it.")
+            self.mods_switch_setup_button.setProperty("targetId", None)
+            self.mods_switch_setup_button.hide()
+            set_role(self.mods_browse_packs_button, "primary")
+        ui.repolish(self.mods_browse_packs_button)
+
+    def _switch_to_modded_setup(self) -> None:
+        target_id = self.mods_switch_setup_button.property("targetId")
+        for row in range(self.instance_list.count()):
+            if self.instance_list.item(row).data(Qt.ItemDataRole.UserRole) == target_id:
+                self.instance_list.setCurrentRow(row)
+                self._set_mods_mode("find")
+                self.mod_search_input.setFocus(Qt.FocusReason.OtherFocusReason)
+                return
+
+    def _result_item(self, result: dict) -> QListWidgetItem:
+        """A two-line search result: name, then who made it or what it is."""
+        title = str(result.get("title") or result.get("name") or result.get("slug") or result.get("project_id"))
+        description = " ".join(str(result.get("description") or "").split())
+        meta = []
+        if result.get("author"):
+            meta.append(f"by {result['author']}")
+        downloads = result.get("downloads")
+        if isinstance(downloads, int) and downloads > 0:
+            meta.append(f"{downloads / 1_000_000:.1f}M downloads" if downloads >= 1_000_000
+                        else f"{downloads / 1000:.0f}k downloads" if downloads >= 1000 else f"{downloads} downloads")
+        item = QListWidgetItem(title)
+        item.setData(Qt.ItemDataRole.UserRole, result)
+        item.setData(ROW_INFO_ROLE, RowInfo(title, " · ".join(meta) or description))
+        item.setToolTip(description)
+        return item
 
     def _refresh_mod_buttons(self) -> None:
         instance = self._selected_instance()
         blocked = self._mutation_blocked(instance, report=False) if instance else True
         has_mod = instance is not None and self.mods_list.currentRow() >= 0
         enabled = instance is not None and not blocked and not self._session_controls_locked
-        self.mod_search_input.setEnabled(enabled)
-        self.mod_search_button.setEnabled(enabled)
+        loader = str((instance or {}).get("loader") or "").strip().lower()
+        searchable = enabled and bool(loader) and loader != "vanilla"
+        self.mod_search_input.setEnabled(searchable)
+        self.mod_search_button.setEnabled(searchable)
         self.mod_search_results.setEnabled(enabled)
         self.mod_release_selector.setEnabled(enabled)
         self.mod_install_button.setEnabled(enabled and self.mod_release_selector.count() > 0)
@@ -2469,6 +3080,9 @@ class LauncherWindow(QMainWindow):
             self.recover_modpack_button,
             self.import_modpack_button,
             self.import_curseforge_button,
+            self.import_pack_menu_button,
+            self.browse_import_modrinth_button,
+            self.browse_import_curseforge_button,
             self.rename_instance_button,
             self.duplicate_instance_button,
             self.delete_instance_button,
@@ -2484,6 +3098,7 @@ class LauncherWindow(QMainWindow):
             control.setEnabled(not locked)
         self._refresh_play_button()
         self._refresh_instance_mutation_buttons()
+        self._refresh_mod_buttons()
 
     def _preserve_lifecycle_status(self) -> bool:
         if self.game_process is None:
@@ -2780,21 +3395,48 @@ class LauncherWindow(QMainWindow):
         self._refresh_instance_mutation_buttons()
 
     def _refresh_install_button(self) -> None:
+        """Name the selected setup's state and make its next step the primary one."""
         instance = self._selected_instance()
+        role, tooltip = "primary", "Download this setup’s Minecraft files"
+        state, tone = "", "muted"
         if instance is None:
             self.install_button.setText("Install Minecraft")
+            role = ""
         elif instance.get("install_error") or instance.get("install_state") == "interrupted":
             self.install_button.setText("Retry installation")
+            tooltip = "Try the install again"
+            state, tone = "● Needs attention", "warn"
+        elif instance.get("install_state") in {"installing", "importing", "updating"}:
+            self.install_button.setText("Install Minecraft")
+            role, state = "", "● Installing…"
+        elif instance.get("ready"):
+            # Ready: Play is the recommended action, so this is maintenance.
+            self.install_button.setText("Repair files")
+            role, tooltip = "", "Check this setup’s Minecraft files and download anything missing"
+            state, tone = "● Ready to play", "good"
         else:
             self.install_button.setText("Install Minecraft")
+            state = "● Not installed"
+        self.install_button.setToolTip(tooltip)
+        if self.install_button.property("role") != role:
+            set_role(self.install_button, role)
+            ui.repolish(self.install_button)
+        self.selected_instance_state.setText(state)
+        self.selected_instance_state.setVisible(bool(state))
+        ui.set_tone(self.selected_instance_state, tone)
 
     def _refresh_play_button(self) -> None:
         instance = self._selected_instance()
-        if instance is None and self._selected_version():
+        version = self._selected_version()
+        if instance is None and version:
             self.play_button.setEnabled(
                 not self._session_controls_locked and self.install_worker is None and self.game_process is None
             )
-            self.play_button.setText("▶  Play")
+            automatic = next((item for item in self.state.get("instances", [])
+                              if item.get("id") == self.state.get("automatic_instances", {}).get(version)), None)
+            ready = self._version_is_downloaded(version) or bool(automatic and automatic.get("ready"))
+            self.play_button.setText("▶  Play" if ready else "⬇  Install && Play")
+            self._explain_play_state()
             return
         available = bool(
             instance and instance.get("install_state") != "incomplete"
@@ -2807,8 +3449,42 @@ class LauncherWindow(QMainWindow):
         self.play_button.setEnabled(available)
         if instance and (instance.get("install_error") or instance.get("install_state") == "interrupted"):
             self.play_button.setText("↻  Retry")
+        elif instance and not instance.get("ready") and not instance.get("provider"):
+            self.play_button.setText("⬇  Install && Play")
         else:
             self.play_button.setText("▶  Play")
+        self._explain_play_state()
+
+    def _play_block_reason(self) -> str:
+        if self.play_button.isEnabled():
+            return ""
+        if self.store.recovery_required:
+            return "Recover your settings first"
+        if self.game_process is not None:
+            return "A game is already running"
+        if self.install_worker is not None:
+            return "Wait for the current install to finish"
+        if self._session_controls_locked:
+            return "Busy with another task"
+        instance = self._selected_instance()
+        if instance is None and not self._selected_version():
+            if self.setup_selector.count() == 0:
+                return ("The version list hasn’t loaded yet" if not getattr(self, "_discovery_error", "")
+                        else "No versions available. Retry the version list")
+            return "Pick a version or setup first"
+        if instance is not None and instance.get("provider"):
+            return "This modpack needs to be repaired from Instances first"
+        return "This setup isn’t ready to start"
+
+    def _explain_play_state(self) -> None:
+        reason = self._play_block_reason()
+        tooltip = reason or {
+            "▶  Play": "Start Minecraft",
+            "⬇  Install && Play": "Download this version, then start Minecraft",
+            "↻  Retry": "Try the install again, then start Minecraft",
+        }.get(self.play_button.text(), "")
+        self.play_button.setToolTip(tooltip)
+        self.play_button.setAccessibleDescription(tooltip)
 
     def _play_selected_instance(self) -> None:
         if self.install_worker is not None or self._session_controls_locked:

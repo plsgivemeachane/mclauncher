@@ -11,8 +11,8 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QEvent, QModelIndex, QObject, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -37,8 +38,9 @@ COBBLE = "#313742"      # raised controls
 SEAM = "#414957"        # borders
 SEAM_SOFT = "#363d49"
 SNOW = "#eceff3"        # primary text
-FOG = "#9aa3b1"         # secondary text
-ASH = "#6f7887"         # disabled text
+FOG = "#aeb6c2"         # secondary text (>= 5.8:1 on every surface)
+ASH = "#8b94a3"         # disabled text, still legible
+HINT = "#9aa3b1"        # placeholders (>= 4.7:1 on input fill)
 PRISMARINE = "#5fd0b5"  # the play accent
 PRISMARINE_DEEP = "#123a32"
 GOLD = "#e9c25b"
@@ -81,25 +83,35 @@ QPushButton#modsNavButton:hover {{ color: {SNOW}; background: transparent; }}
 QPushButton#homeNavButton[active="true"], QPushButton#instancesNavButton[active="true"],
 QPushButton#browseNavButton[active="true"], QPushButton#modsNavButton[active="true"] {{
     color: {SNOW}; border-bottom: 2px solid {PRISMARINE}; }}
+QPushButton#homeNavButton[focusVisible="true"]:focus, QPushButton#instancesNavButton[focusVisible="true"]:focus,
+QPushButton#browseNavButton[focusVisible="true"]:focus, QPushButton#modsNavButton[focusVisible="true"]:focus {{ color: {SNOW}; background: {COBBLE}; border-radius: 4px; }}
 QPushButton#settingsButton {{ background: transparent; border: 1px solid transparent; color: {FOG}; }}
-QPushButton#settingsButton:hover {{ color: {SNOW}; background: {COBBLE}; }}
+QPushButton#settingsButton:hover, QPushButton#settingsButton[focusVisible="true"]:focus {{ color: {SNOW}; background: {COBBLE}; }}
 
 /* Home hero over the artwork */
+QLabel#heroEyebrow {{ font-size: 12px; font-weight: 700; letter-spacing: 1px; color: {PRISMARINE};
+    background: rgba(16, 19, 24, 170); border-radius: 4px; padding: 3px 8px; }}
+QLabel#heroEyebrow[tone="warn"] {{ color: {GOLD}; }}
+QLabel#heroEyebrow[tone="bad"] {{ color: #ff9d94; }}
+QLabel#heroEyebrow[tone="muted"] {{ color: {SNOW}; }}
 QLabel#heroTitle {{ font-family: {DISPLAY_FONT}; font-size: 40px; font-weight: 700; color: #ffffff; }}
-QLabel#heroDetail {{ font-size: 14px; color: #dfe6ea; }}
+QLabel#heroDetail {{ font-size: 15px; color: #eef2f4; }}
 
 /* Launch dock */
 QFrame#launchBar {{ background: {SLATE}; border-top: 1px solid {SEAM_SOFT}; }}
-QLabel#usernameFieldLabel, QLabel#setupFieldLabel {{ color: {FOG}; font-size: 12px; }}
+QLabel#usernameFieldLabel, QLabel#setupFieldLabel {{ color: {FOG}; font-size: 13px; font-weight: 600; }}
 QLabel#instanceStatusLabel {{ color: {SNOW}; font-size: 13px; }}
-QLabel#diagnosticHintLabel, QLabel#usernameWarning, QLabel#modsWarningLabel {{ color: {GOLD}; font-size: 12px; }}
+QLabel#diagnosticHintLabel, QLabel#usernameWarning, QLabel#modsWarningLabel {{ color: {GOLD}; font-size: 13px; }}
 QLabel#stateRecoveryLabel, QLabel#memorySettingError, QLabel#settingsError {{ color: #ff9d94; }}
 
 /* Inputs */
 QLineEdit, QComboBox {{ background: {COBBLE}; color: {SNOW}; border: 1px solid {SEAM}; border-radius: 6px;
     padding: 7px 11px; min-height: 22px; selection-background-color: {PRISMARINE}; selection-color: {PRISMARINE_DEEP}; }}
 QLineEdit:hover, QComboBox:hover {{ border-color: #566072; }}
-QLineEdit:focus, QComboBox:focus {{ border: 1px solid {PRISMARINE}; }}
+/* Text fields always show focus (the caret lives there); other controls only
+   after keyboard use, see FocusVisibility. */
+QLineEdit:focus, QComboBox[focusVisible="true"]:focus {{ border: 2px solid {PRISMARINE}; padding: 6px 10px; }}
+QLineEdit[invalid="true"] {{ border: 2px solid {REDSTONE}; padding: 6px 10px; }}
 QLineEdit:disabled, QComboBox:disabled {{ color: {ASH}; background: {SLATE}; border-color: {SEAM_SOFT}; }}
 QComboBox::drop-down {{ border: 0; width: 26px; }}
 QComboBox QAbstractItemView {{ background: {SLATE}; border: 1px solid {SEAM}; selection-background-color: {COBBLE};
@@ -111,7 +123,7 @@ QPushButton {{ background: {COBBLE}; color: {SNOW}; border: 1px solid {SEAM}; bo
     padding: 7px 14px; font-weight: 600; }}
 QPushButton:hover {{ background: #3a4150; border-color: #566072; }}
 QPushButton:pressed {{ background: {SLATE}; }}
-QPushButton:focus {{ border: 1px solid {PRISMARINE}; }}
+QPushButton[focusVisible="true"]:focus {{ border: 2px solid {PRISMARINE}; }}
 QPushButton:disabled {{ color: {ASH}; background: {SLATE}; border-color: {SEAM_SOFT}; }}
 QPushButton[role="primary"] {{ background: {PRISMARINE}; color: {PRISMARINE_DEEP}; border: 1px solid {PRISMARINE}; }}
 QPushButton[role="primary"]:hover {{ background: #7fe0c8; }}
@@ -121,11 +133,25 @@ QPushButton[role="danger"]:hover {{ background: #3b2423; }}
 QPushButton[role="danger"]:disabled {{ color: {ASH}; border-color: {SEAM_SOFT}; }}
 QPushButton[role="quiet"] {{ background: transparent; border: 1px solid transparent; color: {FOG}; }}
 QPushButton[role="quiet"]:hover {{ background: {COBBLE}; color: {SNOW}; }}
+/* Two mutually exclusive page modes, e.g. Installed / Find mods. */
+QPushButton[role="segment"] {{ background: transparent; color: {FOG}; border: 1px solid {SEAM}; border-radius: 0;
+    padding: 5px 14px; }}
+QPushButton[role="segment"]:hover {{ background: {SLATE}; color: {SNOW}; }}
+QPushButton[role="segment"]:checked {{ background: {COBBLE}; color: {SNOW}; border-color: #566072; }}
+QPushButton[role="segment"][segment="first"] {{ border-top-left-radius: 6px; border-bottom-left-radius: 6px; }}
+QPushButton[role="segment"][segment="last"] {{ border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+    border-left: 0; }}
+QPushButton[role="segment"][focusVisible="true"]:focus {{ border: 2px solid {PRISMARINE}; }}
 QPushButton#playButton {{ background: {PRISMARINE}; color: {PRISMARINE_DEEP}; border: 0; border-radius: 6px;
     font-family: {DISPLAY_FONT}; font-size: 20px; font-weight: 700; padding: 0 26px; }}
 QPushButton#playButton:hover {{ background: #7fe0c8; }}
-QPushButton#playButton:focus {{ border: 2px solid #ffffff; }}
-QPushButton#playButton:disabled {{ background: #2c4a44; color: #8fb3aa; }}
+QPushButton#playButton[focusVisible="true"]:focus {{ border: 2px solid #ffffff; }}
+QPushButton#playButton:disabled {{ background: #2c4a44; color: #a9c9c0; }}
+QPushButton#playButton[subdued="true"] {{ background: transparent; color: {PRISMARINE}; border: 2px solid #3d8f7d;
+    font-size: 17px; }}
+QPushButton#playButton[subdued="true"]:hover {{ background: {PRISMARINE_DEEP}; border-color: {PRISMARINE}; }}
+QPushButton#playButton[subdued="true"][focusVisible="true"]:focus {{ border: 2px solid #ffffff; }}
+QPushButton#playButton[subdued="true"]:disabled {{ color: {ASH}; border-color: {SEAM_SOFT}; background: transparent; }}
 
 /* Lists */
 QListWidget {{ background: {SLATE}; border: 1px solid {SEAM_SOFT}; border-radius: 8px; padding: 4px; outline: 0; }}
@@ -138,6 +164,11 @@ QListWidget:disabled {{ color: {ASH}; }}
 QLabel[role="pageTitle"] {{ font-family: {DISPLAY_FONT}; font-size: 26px; font-weight: 700; color: {SNOW}; }}
 QLabel[role="sectionTitle"] {{ font-size: 13px; font-weight: 700; color: {SNOW}; padding-top: 6px; }}
 QLabel[role="muted"] {{ color: {FOG}; }}
+QLabel[role="hint"] {{ color: {FOG}; font-size: 12px; }}
+QLabel[role="backLink"] {{ color: {FOG}; }}
+QPushButton[role="back"] {{ background: transparent; border: 1px solid transparent; color: {FOG}; padding: 4px 6px;
+    text-align: left; font-weight: 600; }}
+QPushButton[role="back"]:hover, QPushButton[role="back"][focusVisible="true"]:focus {{ color: {SNOW}; background: {COBBLE}; }}
 QLabel#selectedInstanceHeading {{ font-family: {DISPLAY_FONT}; font-size: 24px; font-weight: 700; }}
 QLabel#selectedInstanceDescription, QLabel#modsInstanceLabel, QLabel#modrinthCatalogStatus,
 QLabel#modSearchStatus {{ color: {FOG}; }}
@@ -162,17 +193,148 @@ QProgressBar::chunk {{ background: {PRISMARINE}; border-radius: 2px; }}
 QFrame#versionPopup {{ background: {SLATE}; border: 1px solid {SEAM}; border-radius: 10px; }}
 QFrame#versionPopup QListWidget {{ background: transparent; border: 0; padding: 0; }}
 QLineEdit#setupSearchInput {{ background: {DEEPSLATE}; }}
-QLabel#selectorEmptyLabel {{ color: {FOG}; padding: 18px 6px; }}
+QLabel#selectorEmptyLabel {{ color: {SNOW}; padding: 18px 6px 6px 6px; }}
+QLabel#versionPopupKeys {{ color: {FOG}; font-size: 13px; padding: 4px 2px 0 2px; }}
 QPushButton[role="chip"] {{ background: transparent; color: {FOG}; border: 1px solid {SEAM}; border-radius: 13px;
     padding: 3px 12px; font-weight: 600; font-size: 12px; }}
 QPushButton[role="chip"]:hover {{ color: {SNOW}; }}
 QPushButton[role="chip"]:checked {{ background: {COBBLE}; color: {SNOW}; border-color: {PRISMARINE}; }}
 
+/* Selected setup: one state line, toned like the list badges */
+QLabel#selectedInstanceState {{ font-weight: 700; color: {FOG}; }}
+QLabel#selectedInstanceState[tone="good"] {{ color: {PRISMARINE}; }}
+QLabel#selectedInstanceState[tone="warn"] {{ color: {GOLD}; }}
+QPushButton#importPackMenuButton::menu-indicator {{ subcontrol-position: right center; right: 8px; }}
+QPushButton#importPackMenuButton {{ padding-right: 24px; }}
+QMenu {{ background: {SLATE}; border: 1px solid {SEAM}; padding: 4px; }}
+QMenu::item {{ padding: 7px 18px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {COBBLE}; }}
+
+/* Notice card: a state that replaces a feature, with routes out of it */
+QFrame#modsVanillaNotice {{ background: {SLATE}; border: 1px solid {SEAM_SOFT}; border-radius: 10px; }}
+QFrame#modsVanillaNotice QLabel {{ background: transparent; }}
+QLabel#modsVanillaTitle {{ font-size: 14px; font-weight: 700; }}
+QLabel#modsVanillaDetail {{ color: {FOG}; }}
+
 QDialog {{ background: {SLATE}; }}
+QDialog QLineEdit, QDialog QComboBox {{ background: {COBBLE}; }}
 QCheckBox {{ background: transparent; spacing: 8px; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {SEAM}; border-radius: 4px; background: {COBBLE}; }}
 QCheckBox::indicator:checked {{ background: {PRISMARINE}; border-color: {PRISMARINE}; }}
 """
+
+
+def apply_palette(widget: QWidget) -> None:
+    """Style-sheets do not cover placeholder text; set it on the palette instead."""
+    palette = widget.palette()
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(HINT))
+    widget.setPalette(palette)
+
+
+def repolish(widget: QWidget) -> None:
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+    widget.update()
+
+
+def set_tone(widget: QWidget, tone: str) -> None:
+    if widget.property("tone") != tone:
+        widget.setProperty("tone", tone)
+        repolish(widget)
+
+
+# ── Focus visibility ────────────────────────────────────────────────────────
+FOCUS_VISIBLE = "focusVisible"
+
+
+class FocusVisibility(QObject):
+    """``:focus-visible`` for Qt style sheets.
+
+    ``:focus`` matches however focus arrived: a mouse click, or Qt handing
+    focus to the next widget when the focused one is hidden. Rings then appear
+    on controls the player never moved to. This filter marks the focused
+    widget with a ``focusVisible`` property only when focus follows keyboard
+    use, and the style sheet draws rings on that property instead.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        # None until the first real input; then "keyboard" or "pointer".
+        self.modality: str | None = None
+
+    def visible_for(self, reason: Qt.FocusReason) -> bool:
+        if reason == Qt.FocusReason.MouseFocusReason:
+            return False
+        if self.modality == "keyboard":
+            return True
+        # Before any input, an explicit setFocus() (e.g. a start-up default
+        # or an automation step) is shown; incidental focus moves are not.
+        return self.modality is None and reason == Qt.FocusReason.OtherFocusReason
+
+    @staticmethod
+    def mark(widget: QWidget, visible: bool) -> None:
+        if bool(widget.property(FOCUS_VISIBLE)) == visible:
+            return
+        widget.setProperty(FOCUS_VISIBLE, visible)
+        repolish(widget)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        kind = event.type()
+        if kind == QEvent.Type.KeyPress:
+            self.modality = "keyboard"
+            focused = QApplication.focusWidget()
+            if focused is not None:
+                self.mark(focused, True)
+        elif kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick, QEvent.Type.TouchBegin):
+            self.modality = "pointer"
+            focused = QApplication.focusWidget()
+            if focused is not None:
+                self.mark(focused, False)
+        elif kind == QEvent.Type.FocusIn and isinstance(watched, QWidget):
+            if event.reason() == Qt.FocusReason.MouseFocusReason:
+                self.modality = "pointer"
+            else:
+                # Tab, Backtab and explicit focus moves must never land on a
+                # control scrolled out of view. A click already targets a
+                # visible point, so pointer focus does not scroll.
+                reveal_in_scroll_areas(watched)
+            self.mark(watched, self.visible_for(event.reason()))
+        elif kind == QEvent.Type.FocusOut and isinstance(watched, QWidget):
+            self.mark(watched, False)
+        return False
+
+
+def reveal_in_scroll_areas(widget: QWidget) -> None:
+    """Scroll every enclosing QScrollArea so ``widget`` is fully in view.
+
+    QScrollArea only does this itself when Tab is handled inside it, so
+    focus arriving from outside (or set by code) could stay below the fold.
+    """
+    child = widget
+    parent = widget.parentWidget()
+    while parent is not None and not child.isWindow():
+        if isinstance(parent, QScrollArea) and parent.widget() is not None:
+            parent.ensureWidgetVisible(widget, 12, 12)
+        child, parent = parent, parent.parentWidget()
+
+
+_FOCUS_VISIBILITY: FocusVisibility | None = None
+
+
+def install_focus_visibility(app: QApplication | None = None) -> FocusVisibility | None:
+    """Install one shared tracker on the application (idempotent)."""
+    global _FOCUS_VISIBILITY
+    app = app or QApplication.instance()
+    if app is None:
+        return None
+    if _FOCUS_VISIBILITY is None or _FOCUS_VISIBILITY.parent() is not app:
+        _FOCUS_VISIBILITY = FocusVisibility(app)
+        app.installEventFilter(_FOCUS_VISIBILITY)
+    return _FOCUS_VISIBILITY
+
+
+def focus_visible(widget: QWidget) -> bool:
+    return widget.hasFocus() and bool(widget.property(FOCUS_VISIBLE))
 
 
 def set_role(widget: QWidget, role: str) -> QWidget:
@@ -185,6 +347,110 @@ def rule(parent: QWidget | None = None) -> QFrame:
     line.setProperty("role", "rule")
     line.setFrameShape(QFrame.Shape.NoFrame)
     return line
+
+
+# ── Status text ─────────────────────────────────────────────────────────────
+class StatusLabel(QLabel):
+    """Launch status line that knows whether it only restates the selection.
+
+    ``setText`` is used for news (progress, errors, running games);
+    ``set_summary`` for a plain restatement of what is selected, which views
+    that already show the selection prominently may hide.
+    """
+
+    changed = Signal()
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.is_summary = True
+        super().setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        self.is_summary = False
+        super().setText(text)
+        self.changed.emit()
+
+    def set_summary(self, text: str) -> None:
+        super().setText(text)
+        self.is_summary = True
+        self.changed.emit()
+
+
+class HintLabel(QLabel):
+    """Word-wrapped notice that takes no space while it has nothing to say."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWordWrap(True)
+        self.setVisible(False)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        super().setText(text)
+        self.setVisible(bool(text))
+
+    def clear(self) -> None:
+        super().clear()
+        self.setVisible(False)
+
+
+class PlaceholderList(QListWidget):
+    """List that explains itself when empty instead of showing a blank box."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._placeholder_title = ""
+        self._placeholder_detail = ""
+        self._preferred_height: int | None = None
+
+    def set_preferred_height(self, height: int) -> None:
+        """Prefer ``height`` over QListWidget's 192px default size hint.
+
+        A QScrollArea sizes height-for-width content (anything with wrapped
+        labels) by preferred height, so the default hint can push the
+        controls below a list out of a small window. The list still
+        stretches into any spare room.
+        """
+        self._preferred_height = height
+        self.updateGeometry()
+
+    def sizeHint(self):  # noqa: N802 - Qt override
+        hint = super().sizeHint()
+        if self._preferred_height is not None:
+            hint.setHeight(max(self.minimumHeight(), self._preferred_height))
+        return hint
+
+    def set_placeholder(self, title: str, detail: str = "") -> None:
+        self._placeholder_title = title
+        self._placeholder_detail = detail
+        self.setAccessibleDescription(" ".join(part for part in (title, detail) if part))
+        self.viewport().update()
+
+    def placeholder(self) -> str:
+        return "\n".join(part for part in (self._placeholder_title, self._placeholder_detail) if part)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        if self.count() or not self._placeholder_title:
+            return
+        painter = QPainter(self.viewport())
+        area = self.viewport().rect().adjusted(18, 14, -18, -14)
+        title_font = body_font(14, QFont.Weight.DemiBold)
+        detail_font = body_font(13)
+        flags = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap
+        title_rect = QFontMetrics(title_font).boundingRect(area, flags, self._placeholder_title)
+        detail_rect = (QFontMetrics(detail_font).boundingRect(area, flags, self._placeholder_detail)
+                       if self._placeholder_detail else QRect())
+        block = title_rect.height() + (detail_rect.height() + 6 if self._placeholder_detail else 0)
+        top = area.top() + max(0, (area.height() - block) // 2)
+        painter.setFont(title_font)
+        painter.setPen(QColor(SNOW if self.isEnabled() else FOG))
+        painter.drawText(QRect(area.left(), top, area.width(), title_rect.height()), flags, self._placeholder_title)
+        if self._placeholder_detail:
+            painter.setFont(detail_font)
+            painter.setPen(QColor(FOG))
+            painter.drawText(QRect(area.left(), top + title_rect.height() + 6, area.width(), detail_rect.height()),
+                             flags, self._placeholder_detail)
+        painter.end()
 
 
 # ── Row descriptions ────────────────────────────────────────────────────────
@@ -229,10 +495,13 @@ class RowDelegate(QStyledItemDelegate):
         return self._describe(index.data(Qt.ItemDataRole.UserRole), str(index.data(Qt.ItemDataRole.DisplayRole) or ""))
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # noqa: N802
+        # Rows elide text and pin the badge to the right edge, so they need no
+        # width of their own: the view gives them its viewport's width. Echoing
+        # option.rect here would keep rows as wide as the widest past layout.
         info = self._info(index)
         if info.header:
-            return QSize(option.rect.width(), 30)
-        return QSize(option.rect.width(), 50 if info.detail else 38)
+            return QSize(0, 30)
+        return QSize(0, 50 if info.detail else 38)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         info = self._info(index)
@@ -349,11 +618,26 @@ class VersionPopup(QFrame):
         self.list.itemActivated.connect(self._choose)
         layout.addWidget(self.list, 1)
         self.empty_slot = QVBoxLayout()
+        self.empty_slot.setSpacing(8)
         layout.addLayout(self.empty_slot)
+        self.reset_button = QPushButton("Clear search and show everything", self)
+        self.reset_button.setObjectName("versionPopupResetButton")
+        self.reset_button.clicked.connect(self.reset)
+        self.reset_button.hide()
+        layout.addWidget(self.reset_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(0)
+        key = f'<span style="color:{SNOW}; font-weight:700">%s</span>'
+        self.keys_label = QLabel(
+            f"{key % '↑ ↓'} move &nbsp;&nbsp; {key % 'Enter'} choose &nbsp;&nbsp; {key % 'Esc'} close", self)
+        self.keys_label.setObjectName("versionPopupKeys")
+        self.keys_label.setTextFormat(Qt.TextFormat.RichText)
+        self.keys_label.setAccessibleName("Up and Down move, Enter chooses, Escape closes")
+        layout.addWidget(self.keys_label)
 
     # The window owns the search field and empty label; they live here.
     def adopt(self, search: QLineEdit, empty_label: QLabel) -> None:
         search.setParent(self)
+        search.setAccessibleName("Search versions and setups")
         self.search_slot.addWidget(search)
         search.installEventFilter(self)
         search.returnPressed.connect(self._choose_current)
@@ -361,6 +645,14 @@ class VersionPopup(QFrame):
         empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_slot.addWidget(empty_label)
         self._search = search
+
+    def reset(self) -> None:
+        """Recover from an empty result: clear the search and every filter."""
+        if hasattr(self, "_search"):
+            self._search.clear()
+        self.set_filter("all")
+        if hasattr(self, "_search"):
+            self._search.setFocus()
 
     def set_filter(self, key: str) -> None:
         self._filter = key
@@ -375,15 +667,19 @@ class VersionPopup(QFrame):
         selected_item = None
         group = None
         in_setups = False
+        rows: list[tuple[int, object, str, bool]] = []
         for row in range(combo.count()):
             value = combo.itemData(row, Qt.ItemDataRole.UserRole)
             text = combo.itemText(row)
             if value is None:
                 in_setups = text == "Saved setups"
-                group = None
                 continue
             if combo.view().isRowHidden(row):
                 continue
+            rows.append((row, value, text, in_setups))
+        # The player's own setups come first; the long version history follows.
+        rows.sort(key=lambda entry: not entry[3])
+        for row, value, text, in_setups in rows:
             info = combo.describe(value, text)
             if self._filter == "setups" and not in_setups:
                 continue
@@ -410,17 +706,41 @@ class VersionPopup(QFrame):
                 selected_item = item
         if selected_item is not None:
             self.list.setCurrentItem(selected_item)
-            self.list.scrollToItem(selected_item, QListWidget.ScrollHint.PositionAtCenter)
+        self.reveal_current()
         has_rows = any(self.list.item(i).flags() & Qt.ItemFlag.ItemIsSelectable for i in range(self.list.count()))
         self.list.setVisible(has_rows)
+        query = self._search.text().strip() if hasattr(self, "_search") else ""
         if not has_rows and hasattr(self, "_search"):
-            message = ("No versions or setups match that search" if self._search.text().strip()
-                       else "Nothing installed yet. Pick a version and press Play to download it."
-                       if self._filter == "installed" else "No saved setups yet. Create one on the Instances page.")
+            if query:
+                message = (f"Nothing matches “{query}”.\nCheck the version number, for example 1.20.1, "
+                           "or clear the search to see every version and setup.")
+            elif self._filter == "installed":
+                message = "Nothing installed yet.\nPick any version and press Install & Play to download it."
+            else:
+                message = "No saved setups yet.\nCreate one on the Instances page, or pick a version to play."
             self._picker.empty_label.setText(message)
             self._picker.empty_label.show()
-        elif hasattr(self, "_search") and not self._search.text().strip():
+        elif hasattr(self, "_search") and not query:
             self._picker.empty_label.hide()
+        self.reset_button.setVisible(not has_rows and (bool(query) or self._filter != "all"))
+
+    def reveal_current(self) -> None:
+        """Scroll so the selection shows under its own group heading.
+
+        Runs again once the popup has its real size: scrolling a list that is
+        still hidden uses a stale viewport and can clip the first heading.
+        """
+        self.list.scrollToTop()
+        current = self.list.currentItem()
+        if current is None:
+            return
+        row = self.list.row(current)
+        header = next((self.list.item(r) for r in range(row, -1, -1)
+                       if not self.list.item(r).flags() & Qt.ItemFlag.ItemIsSelectable), None)
+        if header is not None and self.list.row(header) > 0:
+            self.list.scrollToItem(header, QListWidget.ScrollHint.PositionAtTop)
+        if not self.list.viewport().rect().contains(self.list.visualItemRect(current)):
+            self.list.scrollToItem(current, QListWidget.ScrollHint.EnsureVisible)
 
     def _choose(self, item: QListWidgetItem | None) -> None:
         if item is None or not item.flags() & Qt.ItemFlag.ItemIsSelectable:
@@ -452,6 +772,9 @@ class VersionPopup(QFrame):
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.KeyPress and watched is getattr(self, "_search", None):
             key = event.key()
+            if key in (Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):
+                self._step(8 if key == Qt.Key.Key_PageDown else -8)
+                return True
             if key == Qt.Key.Key_Down:
                 self._step(1)
                 return True
@@ -465,6 +788,8 @@ class VersionPopup(QFrame):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        self.layout().activate()
+        self.reveal_current()
         if hasattr(self, "_search"):
             self._search.setFocus()
             self._search.selectAll()
@@ -472,6 +797,9 @@ class VersionPopup(QFrame):
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
         self._picker.update()
+        # Return keyboard focus to the field that opened the picker.
+        if self._picker.isVisible() and self._picker.isEnabled():
+            self._picker.setFocus(Qt.FocusReason.PopupFocusReason)
 
 
 class VersionPicker(QComboBox):
@@ -485,9 +813,12 @@ class VersionPicker(QComboBox):
         self.describe = describe
         self.popup = VersionPopup(self)
         self.empty_label: QLabel | None = None
+        self.loading_text = "Loading the version list…"
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._title_font = body_font(14, QFont.Weight.DemiBold)
         self._detail_font = body_font(12)
+        self.badge_compact = False
 
     def adopt(self, search: QLineEdit, empty_label: QLabel) -> None:
         self.empty_label = empty_label
@@ -524,17 +855,30 @@ class VersionPicker(QComboBox):
         rect = self.rect().adjusted(0, 0, -1, -1)
         enabled = self.isEnabled()
         open_ = self.popup.isVisible()
-        border = QColor(PRISMARINE) if (self.hasFocus() or open_) and enabled else QColor(SEAM)
+        # Ring only for keyboard focus in the active window, or while open;
+        # a click or an inactive window must not look focused.
+        focused = enabled and (open_ or focus_visible(self))
         path = QPainterPath()
         path.addRoundedRect(rect, 6, 6)
-        painter.fillPath(path, QColor(COBBLE if enabled else SLATE))
-        painter.setPen(QPen(border, 1))
-        painter.drawPath(path)
+        painter.fillPath(path, QColor("#38404c" if focused else COBBLE) if enabled else QColor(SLATE))
+        if focused:
+            # A 2px ring plus a soft halo: unmistakable without shifting the layout.
+            halo = QColor(PRISMARINE)
+            halo.setAlpha(70)
+            painter.setPen(QPen(halo, 4))
+            painter.drawPath(path)
+            ring = QPainterPath()
+            ring.addRoundedRect(rect.adjusted(1, 1, -1, -1), 5, 5)
+            painter.setPen(QPen(QColor(PRISMARINE), 2))
+            painter.drawPath(ring)
+        else:
+            painter.setPen(QPen(QColor(SEAM), 1))
+            painter.drawPath(path)
 
         index = self.currentIndex()
         value = self.itemData(index, Qt.ItemDataRole.UserRole) if index >= 0 else None
         if value is None:
-            info = RowInfo(title="Choose a version", detail="Loading the version list…" if not self.count() else "")
+            info = RowInfo(title="Choose a version", detail=self.loading_text if not self.count() else "")
         else:
             info = self.describe(value, self.itemText(index))
 
@@ -547,23 +891,37 @@ class VersionPicker(QComboBox):
             painter.drawPolyline([QPoint(cx - 5, cy - 2), QPoint(cx, cy + 3), QPoint(cx + 5, cy - 2)])
 
         right = rect.right() - 36
+        self.badge_compact = False
         if info.badge:
-            metrics = QFontMetrics(body_font(11, QFont.Weight.Bold))
-            badge_width = metrics.horizontalAdvance(info.badge) + 16
-            badge = QRect(right - badge_width, rect.center().y() - 10, badge_width, 20)
+            badge_font = body_font(11, QFont.Weight.Bold)
+            badge_width = QFontMetrics(badge_font).horizontalAdvance(info.badge) + 16
+            needed = max(QFontMetrics(self._title_font).horizontalAdvance(info.title),
+                         QFontMetrics(self._detail_font).horizontalAdvance(info.detail))
             fill, ink = _TONE_COLORS.get(info.tone, _TONE_COLORS["muted"])
-            pill = QPainterPath()
-            pill.addRoundedRect(badge, 10, 10)
-            if info.tone == "muted":
-                painter.setPen(QPen(fill, 1))
-                painter.drawPath(pill)
-                ink = QColor(FOG)
+            # When the pill would squeeze the name or version into an ellipsis,
+            # a coloured dot carries the state; the tooltip spells it out.
+            self.badge_compact = right - badge_width - 10 - 14 < needed
+            if self.badge_compact:
+                dot = QRect(right - 9, rect.center().y() - 4, 9, 9)
+                painter.setPen(Qt.PenStyle.NoPen if info.tone != "muted" else QPen(QColor(FOG), 1.4))
+                painter.setBrush(fill if info.tone != "muted" else Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(dot)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                right = dot.left() - 10
             else:
-                painter.fillPath(pill, fill)
-            painter.setFont(body_font(11, QFont.Weight.Bold))
-            painter.setPen(ink)
-            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, info.badge)
-            right = badge.left() - 10
+                badge = QRect(right - badge_width, rect.center().y() - 10, badge_width, 20)
+                pill = QPainterPath()
+                pill.addRoundedRect(badge, 10, 10)
+                if info.tone == "muted":
+                    painter.setPen(QPen(fill, 1))
+                    painter.drawPath(pill)
+                    ink = QColor(FOG)
+                else:
+                    painter.fillPath(pill, fill)
+                painter.setFont(badge_font)
+                painter.setPen(ink)
+                painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, info.badge)
+                right = badge.left() - 10
         text_width = max(10, right - 14)
         painter.setFont(self._title_font)
         painter.setPen(QColor(SNOW if enabled else ASH))
@@ -584,3 +942,6 @@ class VersionPicker(QComboBox):
 
 def install_application_font(app: QApplication) -> None:
     app.setFont(body_font(13))
+    palette = app.palette()
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(HINT))
+    app.setPalette(palette)
