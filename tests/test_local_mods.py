@@ -70,6 +70,9 @@ def test_mods_page_import_toggle_remove_and_reopen(tmp_path, monkeypatch):
     window._import_local_mod()
     assert len(window.state["instances"][0]["mods"]) == 1
     assert window.state["instances"][0]["modified"] is True
+    game_directory = window.store.instance_root(instance["id"])
+    assert (game_directory / "mods" / "example.jar").is_file()
+    assert not (window.store.instance_minecraft_root(instance["id"]) / "mods").exists()
     assert window.mods_list.count() == 1
     window.mods_list.setCurrentRow(0)
     window._toggle_selected_mod()

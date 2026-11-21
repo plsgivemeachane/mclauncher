@@ -28,7 +28,7 @@ from .identity import USERNAME_RE, local_identity
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .lifecycle import GameProcessRegistry
 from .memory import default_memory_gib, validate_memory_gib
-from .modpack import CurseForgePackImporter, ModrinthPackImporter, ModrinthPackUpdater
+from .modpack import CurseForgePackImporter, CurseForgeProvider, ModrinthPackImporter, ModrinthPackUpdater
 from .persistence import LauncherStore
 
 
@@ -94,7 +94,10 @@ class LauncherController:
         self.registry = game_registry or GameProcessRegistry(self.store.root)
         self.modrinth_importer = modrinth_importer or ModrinthPackImporter(provider=self.installer)
         self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
-            loader_resolver=getattr(self.installer, "resolve_loader", None)
+            provider=CurseForgeProvider(
+                allow_public=lambda: bool(getattr(self, "state", {}).get("curseforge_public_downloads"))
+            ),
+            loader_resolver=getattr(self.installer, "resolve_loader", None),
         )
         self._popen = popen
         self._run_jobs_inline = run_jobs_inline
@@ -196,6 +199,14 @@ class LauncherController:
             self.state["username"] = username
             self.store.save(self.state)
         return {"username": username, "player_uuid": local_identity(username)}
+
+    def set_curseforge_public_downloads(self, enabled: bool) -> dict[str, Any]:
+        """Save whether CurseForge packs may download through the keyless public API."""
+        with self._lock:
+            self._reload()
+            self.state["curseforge_public_downloads"] = bool(enabled)
+            self.store.save(self.state)
+        return {"curseforge_public_downloads": bool(enabled)}
 
     def set_memory(self, memory_gib: int) -> dict[str, Any]:
         value, error = validate_memory_gib(memory_gib)
@@ -374,8 +385,9 @@ class LauncherController:
 
         def work(job: Job) -> dict[str, Any]:
             minecraft_root = self.store.instance_minecraft_root(instance_id)
+            game_root = self.store.instance_game_root(instance_id)
             try:
-                metadata = importer.import_archive(archive, minecraft_root, on_progress=self._progress(job))
+                metadata = importer.import_archive(archive, game_root, on_progress=self._progress(job))
                 working = self._snapshot(instance_id)
                 working.update(
                     version=metadata["game_version"], minecraft_version=metadata["game_version"],
@@ -383,7 +395,7 @@ class LauncherController:
                     installed_files=metadata["installed_files"], pack_format=metadata["format"],
                     install_state="imported", ready=False, install_error="",
                     installed_file_hashes=ModrinthPackUpdater._file_hashes(
-                        minecraft_root, metadata.get("installed_files", [])),
+                        game_root, metadata.get("installed_files", [])),
                 )
                 if not metadata.get("complete", True):
                     missing = metadata.get("missing_files", [])

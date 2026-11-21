@@ -110,6 +110,11 @@ def build_server(controller: LauncherController | None = None) -> MCPServer:
         return control.set_username(username)
 
     @tool()
+    def set_curseforge_public_downloads(enabled: bool) -> dict[str, Any]:
+        """Save whether CurseForge pack imports may use the keyless public API (size-checked, no hashes) when no API key is set."""
+        return control.set_curseforge_public_downloads(enabled)
+
+    @tool()
     def set_memory(memory_gib: int) -> dict[str, Any]:
         """Set how many GiB of RAM the game gets."""
         return control.set_memory(memory_gib)

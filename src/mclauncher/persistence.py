@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any
 
 
+def game_directory_for(minecraft_directory: Path | str) -> Path:
+    """The game directory for an instance's minecraft/ install folder.
+
+    The game runs one level above minecraft/, so worlds, options and mods survive a
+    reinstall of the install tree.
+    """
+    return Path(minecraft_directory).parent
+
+
 class LauncherStore:
     """Persist launcher-owned data below one dedicated data root."""
 
@@ -41,6 +50,7 @@ class LauncherStore:
             "available_version_metadata": [],
             "show_snapshots": False,
             "background_path": "",
+            "curseforge_public_downloads": False,
         }
 
     def _backup_corrupt_state(self) -> Path | None:
@@ -96,6 +106,8 @@ class LauncherStore:
             return self._invalid_state("available_version_metadata must contain version records")
         if not isinstance(value.get("show_snapshots", False), bool):
             return self._invalid_state("show_snapshots must be a boolean")
+        if not isinstance(value.get("curseforge_public_downloads", False), bool):
+            return self._invalid_state("curseforge_public_downloads must be a boolean")
         if "memory_gib" in value and (isinstance(value["memory_gib"], bool) or not isinstance(value["memory_gib"], int)):
             return self._invalid_state("memory_gib must be an integer")
         for instance in value.get("instances", []):
@@ -112,6 +124,7 @@ class LauncherStore:
         value.setdefault("available_version_metadata", [])
         value.setdefault("show_snapshots", False)
         value.setdefault("background_path", "")
+        value.setdefault("curseforge_public_downloads", False)
         self._baseline = copy.deepcopy(value)
         return value
 
@@ -223,7 +236,16 @@ class LauncherStore:
         self.save(self._defaults())
 
     def instance_minecraft_root(self, instance_id: str) -> Path:
+        """Install tree: libraries, assets, runtime and loader versions."""
         return self.create_instance_root(instance_id) / "minecraft"
+
+    def instance_game_root(self, instance_id: str) -> Path:
+        """Where the game runs (gameDirectory): mods, config, saves, options.
+
+        Pack importers, the updater and mod installers write here, never into
+        :meth:`instance_minecraft_root`.
+        """
+        return game_directory_for(self.instance_minecraft_root(instance_id))
 
     def instance_root(self, instance_id: str) -> Path:
         return self.create_instance_root(instance_id)

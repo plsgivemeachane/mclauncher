@@ -60,7 +60,7 @@ def test_modrinth_search_and_install_stays_on_selected_instance(tmp_path):
 
     assert len(window.state["instances"][0]["mods"]) == 1
     assert window.state["instances"][1]["mods"] == []
-    assert (tmp_path / "data" / "instances" / "pack-1214-a1b2c3d4" / "minecraft" / "mods" / "example.jar").is_file()
+    assert (tmp_path / "data" / "instances" / "pack-1214-a1b2c3d4" / "mods" / "example.jar").is_file()
     assert window.state["instances"][0]["modified"] is True
     assert "curated" in window.mods_warning_label.text().lower()
     window.close()

@@ -40,13 +40,14 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
-from .persistence import LauncherStore
+from .persistence import LauncherStore, game_directory_for
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .memory import default_memory_gib, validate_memory_gib
 from .lifecycle import GameProcessRegistry
 from .modpack import (
     CurseForgePackError,
     CurseForgePackImporter,
+    CurseForgeProvider,
     ModrinthPackError,
     ModrinthPackImporter,
     ModrinthPackUpdateError,
@@ -140,7 +141,10 @@ class LauncherWindow(QMainWindow):
         self.optifine_installer = optifine_installer or OptiFineInstaller()
         self._optifine_injected = optifine_installer is not None
         self.curseforge_importer = curseforge_importer or CurseForgePackImporter(
-            loader_resolver=getattr(self.installer, "resolve_loader", None)
+            provider=CurseForgeProvider(
+                allow_public=lambda: bool(getattr(self, "state", {}).get("curseforge_public_downloads"))
+            ),
+            loader_resolver=getattr(self.installer, "resolve_loader", None),
         )
         self._curseforge_importer_injected = curseforge_importer is not None
         self.curseforge_updater = curseforge_updater or ModrinthPackUpdater(self.curseforge_importer)
@@ -1346,6 +1350,7 @@ class LauncherWindow(QMainWindow):
                 self.modrinth_catalog, release, self.modpack_importer, self.installer,
                 archive, self.store.instance_minecraft_root(instance["id"]), instance,
                 self.modrinth_updater if updating else None, release.id if updating else "",
+                game_directory=self.store.instance_game_root(instance["id"]),
             )
             self._catalog_worker.progress.connect(self._show_import_progress)
             self._catalog_worker.completed.connect(self._catalog_download_completed)
@@ -1460,6 +1465,7 @@ class LauncherWindow(QMainWindow):
         self._set_session_controls_locked(True)
         worker = PackPreparationWorker(
             importer, self.installer, archive, self.store.instance_minecraft_root(instance["id"]), instance,
+            game_directory=self.store.instance_game_root(instance["id"]),
         )
         self._pack_worker = worker
         self._pack_worker_instance = instance
@@ -1527,7 +1533,7 @@ class LauncherWindow(QMainWindow):
             pack_format=metadata["format"], install_state="ready", ready=True, install_error="",
         )
         instance["installed_file_hashes"] = ModrinthPackUpdater._file_hashes(
-            self.store.instance_minecraft_root(instance["id"]), metadata.get("installed_files", [])
+            self.store.instance_game_root(instance["id"]), metadata.get("installed_files", [])
         )
         self.store.save(self.state)
         self.instance_status_label.setText(f"Ready: {instance['name']} ({instance['version']})")
@@ -1537,7 +1543,7 @@ class LauncherWindow(QMainWindow):
         provider = instance.get("provider")
         try:
             metadata = importer.import_archive(
-                archive, self.store.instance_minecraft_root(instance["id"]),
+                archive, self.store.instance_game_root(instance["id"]),
                 on_progress=self._show_import_progress,
             )
             instance.update(
@@ -1546,7 +1552,7 @@ class LauncherWindow(QMainWindow):
                 pack_format=metadata["format"], install_state="imported", ready=False, install_error="",
             )
             instance["installed_file_hashes"] = ModrinthPackUpdater._file_hashes(
-                self.store.instance_minecraft_root(instance["id"]), metadata.get("installed_files", [])
+                self.store.instance_game_root(instance["id"]), metadata.get("installed_files", [])
             )
             if not metadata.get("complete", True):
                 missing = metadata.get("missing_files", [])
@@ -1725,7 +1731,7 @@ class LauncherWindow(QMainWindow):
             instance["update_recovery_required"] = False
             self.store.save(self.state)
             worker = PackUpdateWorker(
-                self._updater_for_provider(provider), archive, self.store.instance_minecraft_root(instance["id"]), instance,
+                self._updater_for_provider(provider), archive, self.store.instance_game_root(instance["id"]), instance,
                 release_id, replacement_directory,
             )
             self._update_worker = worker
@@ -1743,7 +1749,7 @@ class LauncherWindow(QMainWindow):
         try:
             updater = self._updater_for_provider(provider)
             result = updater.update(
-                instance, self.store.instance_minecraft_root(instance["id"]), archive,
+                instance, self.store.instance_game_root(instance["id"]), archive,
                 release_id=release_id or str(instance.get("pending_pack_release_id", "")),
                 on_progress=self._show_import_progress,
                 confirm_local_changes=lambda paths: QMessageBox.question(
@@ -1834,11 +1840,11 @@ class LauncherWindow(QMainWindow):
         self._set_session_controls_locked(True)
         try:
             updater = self._updater_for_provider(provider)
-            instance_root = self.store.instance_minecraft_root(instance["id"])
-            updater.recover(instance, instance_root)
+            game_root = self.store.instance_game_root(instance["id"])
+            updater.recover(instance, game_root)
             self.store.save(self.state)
             try:
-                ModrinthPackUpdater._durable_unlink(instance_root.parent / "update-journal.json")
+                ModrinthPackUpdater._durable_unlink(game_root / "update-journal.json")
             except (OSError, RuntimeError):
                 self._mark_update_recovery_required(instance, "Pack recovery journal cleanup was not durable", force_recovery=True)
                 raise
@@ -2211,7 +2217,7 @@ class LauncherWindow(QMainWindow):
             return
         self.mod_install_button.setEnabled(False)
         if not self._mod_installer_injected:
-            self._mod_worker = ModInstallWorker(self.mod_installer, instance, self.store.instance_minecraft_root(instance["id"]), release)
+            self._mod_worker = ModInstallWorker(self.mod_installer, instance, self.store.instance_game_root(instance["id"]), release)
             self._mod_worker.completed.connect(self._mod_install_completed)
             self._mod_worker.failed.connect(lambda message: self.mod_search_status.setText(f"Mod installation failed: {message}. Retry when the files are available."))
             self._mod_worker.finished.connect(lambda: self.mod_install_button.setEnabled(self.mod_release_selector.count() > 0))
@@ -2219,7 +2225,7 @@ class LauncherWindow(QMainWindow):
             return
         try:
             entries = self.mod_installer.install(
-                instance, self.store.instance_minecraft_root(instance["id"]), release,
+                instance, self.store.instance_game_root(instance["id"]), release,
                 on_progress=lambda status, _current, _maximum: self.mod_search_status.setText(status),
             )
             instance.setdefault("mods", []).extend(entries)
@@ -2314,12 +2320,12 @@ class LauncherWindow(QMainWindow):
             self.mods_warning_label.setText(f"Cannot import {source.name}: {metadata['compatibility_reason']}")
             return
         try:
-            target = copy_mod_to_instance(source, self.store.instance_minecraft_root(instance["id"]))
+            target = copy_mod_to_instance(source, self.store.instance_game_root(instance["id"]))
         except (OSError, ValueError) as error:
             self.mods_warning_label.setText(f"Could not import {source.name}: {error}")
             return
         mod = dict(metadata)
-        mod.update({"id": f"local:{target.name}", "filename": target.name, "path": str(target.relative_to(self.store.instance_minecraft_root(instance["id"]))),
+        mod.update({"id": f"local:{target.name}", "filename": target.name, "path": str(target.relative_to(self.store.instance_game_root(instance["id"]))),
                     "enabled": True, "source": "local", "source_path": str(source)})
         instance.setdefault("mods", []).append(mod)
         instance["modified"] = True
@@ -2338,7 +2344,7 @@ class LauncherWindow(QMainWindow):
         if self._mutation_blocked(instance) or instance is None or row < 0:
             return
         mod = instance.get("mods", [])[row]
-        root = self.store.instance_minecraft_root(instance["id"])
+        root = self.store.instance_game_root(instance["id"])
         current = root / str(mod.get("path", ""))
         enabled = not bool(mod.get("enabled", True))
         destination = root / ("mods" if enabled else "mods-disabled") / str(mod.get("filename", current.name))
@@ -2363,7 +2369,7 @@ class LauncherWindow(QMainWindow):
         if self._mutation_blocked(instance) or instance is None or row < 0:
             return
         mod = instance.get("mods", [])[row]
-        root = self.store.instance_minecraft_root(instance["id"])
+        root = self.store.instance_game_root(instance["id"])
         try:
             (root / str(mod.get("path", ""))).unlink(missing_ok=True)
         except OSError as error:
@@ -2447,7 +2453,7 @@ class LauncherWindow(QMainWindow):
             return
         label = "screenshots folder" if screenshots else "instance folder"
         try:
-            folder = self.store.instance_minecraft_root(instance["id"])
+            folder = self.store.instance_game_root(instance["id"])
             if screenshots:
                 folder = folder / "screenshots"
                 folder.mkdir(parents=True, exist_ok=True)
@@ -3122,12 +3128,13 @@ class PackPreparationWorker(QThread):
     failed = Signal(str)
     progress = Signal(str, int, int)
 
-    def __init__(self, importer, installer, archive, directory, instance) -> None:
+    def __init__(self, importer, installer, archive, directory, instance, *, game_directory=None) -> None:
         super().__init__()
         self.importer = importer
         self.installer = installer
         self.archive = archive
         self.directory = directory
+        self.game_directory = game_directory or game_directory_for(directory)
         self.instance = instance.copy()
         self.metadata = None
         self.instance_result = None
@@ -3140,7 +3147,7 @@ class PackPreparationWorker(QThread):
     def run(self) -> None:
         try:
             self.metadata = self.importer.import_archive(
-                self.archive, self.directory,
+                self.archive, self.game_directory,
                 on_progress=lambda *args: self.progress.emit(*args),
                 cancel_event=self.cancel_event,
             )
@@ -3169,7 +3176,8 @@ class CatalogOperationWorker(QThread):
     failed = Signal(str)
     progress = Signal(str, int, int)
 
-    def __init__(self, catalog, release, importer, installer, archive, directory, instance, updater=None, release_id="") -> None:
+    def __init__(self, catalog, release, importer, installer, archive, directory, instance, updater=None, release_id="",
+                 *, game_directory=None) -> None:
         super().__init__()
         self.catalog = catalog
         self.release = release
@@ -3177,6 +3185,7 @@ class CatalogOperationWorker(QThread):
         self.installer = installer
         self.archive = archive
         self.directory = directory
+        self.game_directory = game_directory or game_directory_for(directory)
         self.instance = instance.copy()
         self.updater = updater
         self.release_id = release_id
@@ -3199,7 +3208,7 @@ class CatalogOperationWorker(QThread):
             self.archive.write_bytes(downloaded)
             if self.updating:
                 result = self.updater.update(
-                    self.instance, self.directory, self.archive, release_id=self.release_id,
+                    self.instance, self.game_directory, self.archive, release_id=self.release_id,
                     on_progress=lambda *args: self.progress.emit(*args),
                     confirm_local_changes=lambda _paths: True,
                     cancel_event=self.cancel_event,
@@ -3207,7 +3216,7 @@ class CatalogOperationWorker(QThread):
                 self.metadata = result["metadata"]
             else:
                 self.metadata = self.importer.import_archive(
-                    self.archive, self.directory,
+                    self.archive, self.game_directory,
                     on_progress=lambda *args: self.progress.emit(*args), cancel_event=self.cancel_event,
                 )
                 if not self.metadata.get("complete", True):

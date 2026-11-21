@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
+from .persistence import game_directory_for
+
 
 class OptiFineError(ValueError):
     """The selected artifact cannot be prepared safely."""
@@ -111,7 +113,7 @@ class OptiFineInstaller:
         root = Path(minecraft_directory)
         root.mkdir(parents=True, exist_ok=True)
         if loader == "forge":
-            destination = root / "mods" / Path(jar_path).name
+            destination = game_directory_for(root) / "mods" / Path(jar_path).name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(jar_path, destination)
             launch_version = instance.get("launch_version") or instance.get("version")

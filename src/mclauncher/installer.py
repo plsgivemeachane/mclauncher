@@ -15,6 +15,7 @@ from minecraft_launcher_lib import mod_loader
 from PySide6.QtCore import QObject, QTimer
 
 from . import __version__
+from .persistence import game_directory_for
 
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
@@ -221,7 +222,7 @@ class MinecraftPlayer:
         executable = minecraft_launcher_lib.runtime.get_executable_path(runtime_info["name"], minecraft_directory)
         if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
             raise RuntimeError("The managed Java runtime is unavailable; install or retry before playing")
-        game_directory = minecraft_directory.parent
+        game_directory = game_directory_for(minecraft_directory)
         options = {
             "username": username,
             "uuid": player_uuid,

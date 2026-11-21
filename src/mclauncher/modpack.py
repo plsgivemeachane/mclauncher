@@ -283,11 +283,58 @@ class ModrinthPackUpdater:
     def __init__(self, importer: ModrinthPackImporter):
         self.importer = importer
 
+    # Entries of the game directory that a pack update never owns: the minecraft/
+    # install tree (libraries, assets, runtime, versions), the update's own backups
+    # and journal, and in-flight staging folders.
+    _UNMANAGED_ENTRIES = frozenset({"minecraft", "backups", "update-journal.json"})
+
     @staticmethod
     def _copy_tree(source: Path, destination: Path) -> None:
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(source, destination)
+
+    @classmethod
+    def _managed_entries(cls, root: Path) -> list[Path]:
+        return sorted(
+            entry for entry in root.iterdir()
+            if entry.name not in cls._UNMANAGED_ENTRIES and not entry.name.startswith(".")
+        )
+
+    @classmethod
+    def _backup_game_directory(cls, root: Path, backup: Path) -> None:
+        if backup.exists():
+            shutil.rmtree(backup)
+        backup.mkdir(parents=True)
+        for entry in cls._managed_entries(root):
+            if entry.is_dir():
+                shutil.copytree(entry, backup / entry.name)
+            else:
+                shutil.copy2(entry, backup / entry.name)
+
+    @classmethod
+    def _durable_restored(cls, root: Path) -> None:
+        # Sync only what a restore rewrote; minecraft/ holds thousands of untouched files.
+        for entry in cls._managed_entries(root):
+            if entry.is_dir():
+                cls._durable_tree(entry)
+            else:
+                cls._fsync_file(entry)
+        cls._fsync_file(root)
+
+    @classmethod
+    def _restore_game_directory(cls, backup: Path, root: Path) -> None:
+        """Make the managed part of ``root`` equal to ``backup``; leave the rest alone."""
+        for entry in cls._managed_entries(root):
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        for entry in sorted(backup.iterdir()):
+            if entry.is_dir():
+                shutil.copytree(entry, root / entry.name)
+            else:
+                shutil.copy2(entry, root / entry.name)
 
     @staticmethod
     def _fsync_file(path: Path) -> None:
@@ -365,7 +412,7 @@ class ModrinthPackUpdater:
     def update(
         self,
         instance: dict,
-        minecraft_directory: Path | str,
+        game_directory: Path | str,
         archive_path: Path | str,
         *,
         release_id: str = "",
@@ -376,16 +423,16 @@ class ModrinthPackUpdater:
     ) -> dict:
         if instance.get("install_state") == "installing" or instance.get("active"):
             raise ModrinthPackUpdateError("This instance is active; finish preparation or exit the game before updating")
-        root = Path(minecraft_directory)
+        root = Path(game_directory)
         if not root.is_dir():
             raise ModrinthPackUpdateError("The selected Modrinth instance has no usable data directory")
-        if (root.parent / "update-journal.json").is_file():
+        if (root / "update-journal.json").is_file():
             raise ModrinthPackUpdateError("An interrupted pack update must be recovered before starting another update")
         progress = on_progress or (lambda *_args: None)
-        stage = Path(tempfile.mkdtemp(prefix=".modrinth-update-", dir=str(root.parent)))
-        backup_root = root.parent / "backups"
+        stage = Path(tempfile.mkdtemp(prefix=".modrinth-update-", dir=str(root)))
+        backup_root = root / "backups"
         backup = backup_root / f"{instance.get('id', 'instance')}-{time.time_ns()}"
-        journal = root.parent / "update-journal.json"
+        journal = root / "update-journal.json"
         old_files = {str(path) for path in instance.get("installed_files", []) if isinstance(path, str)}
         previous_instance = dict(instance)
         try:
@@ -421,7 +468,7 @@ class ModrinthPackUpdater:
             if local_names and confirm_local_changes is not None and not confirm_local_changes(local_names):
                 raise ModrinthPackUpdateError("Update cancelled because local mod changes were not confirmed")
             backup_root.mkdir(parents=True, exist_ok=True)
-            self._copy_tree(root, backup)
+            self._backup_game_directory(root, backup)
             journal_data = {
                 "provider": metadata.get("provider", instance.get("provider", "modrinth")),
                 "instance_id": instance.get("id", ""), "backup": str(backup),
@@ -464,8 +511,8 @@ class ModrinthPackUpdater:
         except Exception as error:
             if backup.is_dir():
                 try:
-                    self._copy_tree(backup, root)
-                    self._durable_tree(root)
+                    self._restore_game_directory(backup, root)
+                    self._durable_restored(root)
                 except OSError as recovery_error:
                     raise ModrinthPackUpdateError(
                         f"Update failed and recovery failed: {recovery_error}"
@@ -477,10 +524,10 @@ class ModrinthPackUpdater:
         finally:
             shutil.rmtree(stage, ignore_errors=True)
 
-    def recover(self, instance: dict, minecraft_directory: Path | str) -> None:
+    def recover(self, instance: dict, game_directory: Path | str) -> None:
         backup = Path(str(instance.get("recovery_backup", "")))
-        root = Path(minecraft_directory)
-        journal = root.parent / "update-journal.json"
+        root = Path(game_directory)
+        journal = root / "update-journal.json"
         if instance.get("update_recovery_required") and not journal.is_file():
             instance["install_state"] = "ready"
             instance["ready"] = True
@@ -502,8 +549,8 @@ class ModrinthPackUpdater:
             journal_data = json.loads(journal.read_text(encoding="utf-8")) if journal.is_file() else {}
         except (OSError, json.JSONDecodeError):
             journal_data = {}
-        self._copy_tree(backup, root)
-        self._durable_tree(root)
+        self._restore_game_directory(backup, root)
+        self._durable_restored(root)
         previous_instance = journal_data.get("previous_instance") if isinstance(journal_data, dict) else None
         if isinstance(previous_instance, dict):
             instance.clear()
@@ -525,9 +572,20 @@ class CurseForgeProvider:
 
     base_url = "https://api.curseforge.com/v1"
 
-    def __init__(self, api_key: str | None = None, *, opener=None) -> None:
+    def __init__(self, api_key: str | None = None, *, opener=None,
+                 allow_public: Callable[[], bool] | None = None) -> None:
         self.api_key = api_key or os.environ.get("CURSEFORGE_API_KEY")
         self.opener = opener or urllib.request.urlopen
+        # Read at call time so a saved preference applies without a restart.
+        self.allow_public = allow_public or (lambda: False)
+        self._public: CurseForgePublicProvider | None = None
+
+    def _keyless(self) -> "CurseForgePublicProvider | None":
+        if self.api_key or not self.allow_public():
+            return None
+        if self._public is None:
+            self._public = CurseForgePublicProvider(opener=self.opener)
+        return self._public
 
     def _request(self, url: str) -> dict:
         if not self.api_key:
@@ -545,6 +603,9 @@ class CurseForgeProvider:
         return value["data"]
 
     def resolve_file(self, project_id: int, file_id: int) -> dict:
+        public = self._keyless()
+        if public is not None:
+            return public.resolve_file(project_id, file_id)
         value = self._request(f"{self.base_url}/mods/{project_id}/files/{file_id}/download-url")
         if not isinstance(value, str) or not value.startswith("https://"):
             raise CurseForgePackError("CurseForge returned an invalid file download URL")
@@ -558,6 +619,11 @@ class CurseForgeProvider:
         return metadata
 
     def download_file(self, metadata: Mapping[str, object]) -> bytes:
+        if metadata.get("public_size_only") is True:
+            public = self._keyless()
+            if public is None:
+                raise CurseForgeAccessError("Keyless CurseForge downloads are turned off; enable them and retry")
+            return public.download_file(metadata)
         url = metadata.get("url")
         if not isinstance(url, str) or urlparse(url).scheme.lower() != "https":
             raise CurseForgePackError("CurseForge returned an invalid secure file URL")
@@ -571,6 +637,61 @@ class CurseForgeProvider:
                 return response.read()
         except Exception as error:
             raise CurseForgePackError(f"CurseForge file download failed: {error}") from error
+
+
+class CurseForgePublicProvider:
+    """Keyless adapter for the public curseforge.com website API.
+
+    The website API needs no key but its file metadata carries no hashes, so
+    files fetched this way are checked by declared byte length and by landing on
+    CurseForge's own CDN.  That is weaker than hash verification, which is why
+    it only runs when the player opts in through a saved preference.
+    """
+
+    base_url = "https://www.curseforge.com/api/v1"
+    cdn_hosts = frozenset({"edge.forgecdn.net", "mediafilez.forgecdn.net"})
+    user_agent = "mclauncher (keyless CurseForge import)"
+
+    def __init__(self, *, opener=None) -> None:
+        self.opener = opener or urllib.request.urlopen
+
+    def _open(self, url: str, accept: str):
+        request = urllib.request.Request(url, headers={"User-Agent": self.user_agent, "Accept": accept})
+        return self.opener(request, timeout=60)
+
+    def resolve_file(self, project_id: int, file_id: int) -> dict:
+        url = f"{self.base_url}/mods/{project_id}/files/{file_id}"
+        try:
+            with self._open(url, "application/json") as response:
+                value = json.loads(response.read().decode("utf-8"))
+        except Exception as error:
+            raise CurseForgePackError(f"CurseForge public file lookup failed: {error}") from error
+        data = value.get("data") if isinstance(value, dict) else None
+        if not isinstance(data, dict) or data.get("id") != file_id:
+            raise CurseForgePackError("CurseForge public API returned no metadata for this file")
+        length = data.get("fileLength")
+        if not isinstance(data.get("fileName"), str) or isinstance(length, bool) or not isinstance(length, int) or length <= 0:
+            raise CurseForgePackError("CurseForge public API returned incomplete file metadata")
+        return {
+            "fileName": data["fileName"], "fileLength": length,
+            "url": f"{url}/download", "project_id": project_id, "file_id": file_id,
+            "public_size_only": True,
+        }
+
+    def download_file(self, metadata: Mapping[str, object]) -> bytes:
+        url = metadata.get("url")
+        if not isinstance(url, str) or not url.startswith(f"{self.base_url}/mods/"):
+            raise CurseForgePackError("Keyless CurseForge downloads must use the public download endpoint")
+        try:
+            with self._open(url, "*/*") as response:
+                final = urlparse(response.geturl())
+                if final.scheme.lower() != "https" or final.hostname not in self.cdn_hosts:
+                    raise CurseForgePackError(f"CurseForge redirected to an unexpected host: {final.hostname}")
+                return response.read()
+        except CurseForgePackError:
+            raise
+        except Exception as error:
+            raise CurseForgePackError(f"CurseForge public download failed: {error}") from error
 
 
 class CurseForgePackImporter:
@@ -621,7 +742,7 @@ class CurseForgePackImporter:
                              ("fabric-loader-", "fabric"), ("fabric-", "fabric"),
                              ("quilt-loader-", "quilt"), ("quilt-", "quilt")):
             if identifier.startswith(prefix) and identifier[len(prefix):]:
-                return name, identifier[len(prefix):], name
+                return manifest["minecraft"]["version"], identifier[len(prefix):], name
         raise CurseForgePackError(f"CurseForge loader {identifier!r} is not supported")
 
     @staticmethod
@@ -678,7 +799,12 @@ class CurseForgePackImporter:
             return False
         if isinstance(sha512, str) and hashlib.sha512(content).hexdigest().lower() != sha512.lower():
             return False
-        return isinstance(sha1, str) or isinstance(sha512, str)
+        if isinstance(sha1, str) or isinstance(sha512, str):
+            return True
+        # Opt-in keyless metadata has no hashes; fall back to the declared length.
+        length = metadata.get("fileLength")
+        return (metadata.get("public_size_only") is True and isinstance(length, int)
+                and not isinstance(length, bool) and len(content) == length)
 
     def verify_replacement(self, replacement: Path | str, entry: Mapping[str, object]) -> bool:
         metadata = self._resolve(entry.get("projectID"), entry.get("fileID"))
@@ -783,7 +909,7 @@ class CurseForgePackImporter:
                 "provider": "curseforge", "format": "curseforge-export", "game_version": game,
                 "loader": loader_id, "loader_version": loader_version, "installed_files": sorted(set(installed)),
                 "missing_files": missing, "complete": complete,
-                "recovery_action": "Recovery: retry after configuring the CurseForge API key (CURSEFORGE_API_KEY) or provide each missing file for authoritative verification",
+                "recovery_action": "Recovery: retry after configuring the CurseForge API key (CURSEFORGE_API_KEY), turning on the keyless CurseForge downloads preference, or providing each missing file for verification",
                 "manifest": manifest,
             }
         except zipfile.BadZipFile as error:

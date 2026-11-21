@@ -499,7 +499,7 @@ def test_crash_context_remains_available_after_game_exits(tmp_path, monkeypatch)
     application.processEvents()
 
 
-def test_open_instance_folder_uses_selected_minecraft_root(tmp_path, monkeypatch):
+def test_open_instance_folder_uses_selected_game_directory(tmp_path, monkeypatch):
     application = QApplication.instance() or QApplication([])
     window = LauncherWindow(data_root=tmp_path / "launcher-data")
     window.show()
@@ -511,7 +511,7 @@ def test_open_instance_folder_uses_selected_minecraft_root(tmp_path, monkeypatch
     window.open_folder_button.click()
 
     assert len(opened) == 1
-    assert opened[0].toLocalFile() == str(window.store.instance_minecraft_root(window.state["instances"][0]["id"]))
+    assert opened[0].toLocalFile() == str(window.store.instance_game_root(window.state["instances"][0]["id"]))
     assert "Opened instance folder" in window.diagnostic_hint_label.text()
     window.close()
     application.processEvents()
@@ -563,7 +563,7 @@ def test_crash_diagnostics_stay_bound_to_game_instance_after_selection_changes(t
     window._open_instance_folder()
     window.save_log_button.click()
 
-    assert opened[0].toLocalFile() == str(window.store.instance_minecraft_root(second["id"]))
+    assert opened[0].toLocalFile() == str(window.store.instance_game_root(second["id"]))
     assert opened[1].toLocalFile() == str(window.store.instance_root(first["id"]))
     assert f"Instance: {first['name']}" in output.read_text(encoding="utf-8")
     window.close()

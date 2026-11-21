@@ -129,3 +129,18 @@ def test_window_keeps_incompatible_optifine_failed_and_retryable(tmp_path, monke
     assert instance["install_state"] == "failed"
     assert "not verified" in instance["install_error"]
     window.close()
+
+
+def test_forge_optifine_jar_goes_to_the_game_directory_mods_folder(tmp_path):
+    # Forge loads mods from gameDirectory/mods, and gameDirectory is the parent of the
+    # instance's minecraft/ install folder.
+    root = tmp_path / "instance" / "minecraft"
+    jar = _jar(tmp_path / "OptiFine_1.20.1_HD_U_I6.jar")
+    installer = OptiFineInstaller({("1.20.1", "1.20.1_HD_U_I6"): OptiFineCompatibility(
+        "1.20.1", "1.20.1_HD_U_I6", forge_version="47.3.0")})
+    instance = {"minecraft_version": "1.20.1", "loader": "forge", "loader_version": "47.3.0"}
+
+    installer.prepare(instance, root, jar)
+
+    assert (tmp_path / "instance" / "mods" / jar.name).is_file()
+    assert not (root / "mods").exists()

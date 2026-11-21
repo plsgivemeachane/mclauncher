@@ -200,6 +200,18 @@ def test_changes_made_by_the_gui_are_visible_to_the_controller(tmp_path):
     assert [item["name"] for item in control.list_instances()] == ["From GUI"]
 
 
+def test_keyless_curseforge_preference_is_saved_and_read_by_the_provider(tmp_path):
+    control = LauncherController(tmp_path / "data", run_jobs_inline=True)
+    provider = control.curseforge_importer.provider
+    assert LauncherStore(tmp_path / "data").load()["curseforge_public_downloads"] is False
+    assert provider.allow_public() is False
+
+    assert control.set_curseforge_public_downloads(True) == {"curseforge_public_downloads": True}
+
+    assert LauncherStore(tmp_path / "data").load()["curseforge_public_downloads"] is True
+    assert provider.allow_public() is True
+
+
 def test_mcp_server_exposes_tools_and_reports_errors(tmp_path):
     pytest.importorskip("mcp")
     from mcp.server.mcpserver.exceptions import ToolError
@@ -210,7 +222,7 @@ def test_mcp_server_exposes_tools_and_reports_errors(tmp_path):
 
     async def scenario():
         names = {tool.name for tool in await server.list_tools()}
-        assert {"create_instance", "import_modpack", "launch_game", "get_job", "stop_game"} <= names
+        assert {"create_instance", "import_modpack", "launch_game", "get_job", "stop_game", "set_curseforge_public_downloads"} <= names
         result = await server.call_tool("create_instance", {"name": "Via MCP", "version": "1.21.1", "install": True})
         payload = json.loads(result.content[0].text)
         assert payload["job"]["status"] == "succeeded"
@@ -226,3 +238,19 @@ def _wait_for(predicate, timeout=5.0):
         if time.monotonic() > deadline:
             raise AssertionError("condition was not met in time")
         time.sleep(0.02)
+
+
+def test_import_modpack_writes_pack_content_into_the_game_directory(tmp_path):
+    # The game runs with gameDirectory = the instance root, so pack content must land
+    # there, while loader/runtime files stay in the instance's minecraft/ folder.
+    control = _controller(tmp_path)
+    job = control.import_modpack(str(_pack(tmp_path, "modrinth.index.json", "Cool Pack.mrpack")))
+
+    assert job["status"] == "succeeded", job["message"]
+    instance = control.get_instance("Cool Pack")
+    game_directory = control.store.instance_root(instance["id"])
+    assert (game_directory / "mods" / "a.jar").is_file()
+    assert not (control.store.instance_minecraft_root(instance["id"]) / "mods").exists()
+    assert (control.store.instance_minecraft_root(instance["id"]) / "ready").is_file()
+    saved = next(item for item in control.store.load()["instances"] if item["id"] == instance["id"])
+    assert saved["installed_file_hashes"]["mods/a.jar"]

@@ -39,13 +39,13 @@ def test_open_folder_button_is_available_on_home_and_instances_and_matches_play_
     window.close()
 
 
-def test_open_folder_targets_selected_instance_minecraft_directory_and_follows_selection(tmp_path, monkeypatch):
+def test_open_folder_targets_selected_instance_game_directory_and_follows_selection(tmp_path, monkeypatch):
     application, window = _window(tmp_path, monkeypatch)
     first = _create_instance(window, "Survival")
     second = _create_instance(window, "Creative")
-    first_minecraft = window.store.instance_minecraft_root(first["id"])
-    second_minecraft = window.store.instance_minecraft_root(second["id"])
-    screenshot = first_minecraft / "screenshots" / "spawn.png"
+    first_game = window.store.instance_game_root(first["id"])
+    second_game = window.store.instance_game_root(second["id"])
+    screenshot = first_game / "screenshots" / "spawn.png"
     screenshot.parent.mkdir(parents=True, exist_ok=True)
     screenshot.write_bytes(b"png")
     opened = []
@@ -56,7 +56,7 @@ def test_open_folder_targets_selected_instance_minecraft_directory_and_follows_s
     window.instance_list.setCurrentRow(1)
     window.open_folder_button.click()
 
-    assert [url.toLocalFile() for url in opened] == [str(first_minecraft), str(second_minecraft)]
+    assert [url.toLocalFile() for url in opened] == [str(first_game), str(second_game)]
     assert screenshot.is_file()
     window.close()
 
@@ -72,7 +72,7 @@ def test_open_folder_is_disabled_without_selected_instance(tmp_path, monkeypatch
 def test_open_screenshots_button_creates_and_opens_selected_instance_screenshots(tmp_path, monkeypatch):
     application, window = _window(tmp_path, monkeypatch)
     instance = _create_instance(window, "Screenshots")
-    screenshots = window.store.instance_minecraft_root(instance["id"]) / "screenshots"
+    screenshots = window.store.instance_game_root(instance["id"]) / "screenshots"
     if screenshots.exists():
         screenshots.rmdir()
     opened = []
@@ -134,5 +134,5 @@ def test_folder_open_failure_reports_selected_directory(tmp_path, monkeypatch):
     monkeypatch.setattr("mclauncher.app.QDesktopServices.openUrl", lambda url: False)
     window.open_folder_button.click()
     assert "Could not open instance folder" in window.diagnostic_hint_label.text()
-    assert str(window.store.instance_minecraft_root(instance["id"])) in window.diagnostic_hint_label.text()
+    assert str(window.store.instance_game_root(instance["id"])) in window.diagnostic_hint_label.text()
     window.close()

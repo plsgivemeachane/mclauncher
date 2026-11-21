@@ -76,7 +76,7 @@ def test_journal_is_durable_before_live_tree_publication(tmp_path):
 
     updater._publish_journal = publish
     updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: True)
-    assert observed == {"old_file_present": True, "journal_parent": root.parent}
+    assert observed == {"old_file_present": True, "journal_parent": root}
 
 
 def test_changed_path_sync_flushes_all_ancestor_directories(tmp_path, monkeypatch):
@@ -99,13 +99,13 @@ def test_recovery_syncs_restored_tree_before_journal_unlink(tmp_path, monkeypatc
     updater = ModrinthPackUpdater(FakeImporter())
     updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: True)
     order = []
-    original_tree = updater._durable_tree
+    original_restored = updater._durable_restored
     original_unlink = updater._durable_unlink
-    monkeypatch.setattr(updater, "_durable_tree", lambda path: (order.append("sync"), original_tree(path))[1])
+    monkeypatch.setattr(updater, "_durable_restored", lambda path: (order.append("sync"), original_restored(path))[1])
     monkeypatch.setattr(updater, "_durable_unlink", lambda path: (order.append("unlink"), original_unlink(path))[1])
     updater.recover(instance, root)
     assert order == ["sync"]
-    assert (root.parent / "update-journal.json").is_file()
+    assert (root / "update-journal.json").is_file()
 
 
 def test_update_declined_local_warning_does_not_publish(tmp_path):
@@ -144,13 +144,13 @@ def test_failure_restores_live_tree_and_recovery_restores_backup(tmp_path):
         return True
 
     updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=cancel)
-    assert (root.parent / "update-journal.json").is_file()
+    assert (root / "update-journal.json").is_file()
     (root / "mods" / "pack-new.jar").write_bytes(b"damaged")
     updater.recover(instance, root)
     assert (root / "mods" / "pack-old.jar").read_bytes() == b"old"
     assert not (root / "mods" / "pack-new.jar").exists()
     assert instance["installed_files"] == ["mods/pack-old.jar"]
-    assert (root.parent / "update-journal.json").is_file()
+    assert (root / "update-journal.json").is_file()
 
 
 def test_update_journal_survives_reopen_until_recovery(tmp_path):
@@ -158,7 +158,7 @@ def test_update_journal_survives_reopen_until_recovery(tmp_path):
     instance = _instance(root)
     updater = ModrinthPackUpdater(FakeImporter())
     updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: True)
-    journal = root.parent / "update-journal.json"
+    journal = root / "update-journal.json"
     journal.write_text('{"backup": "missing"}\n', encoding="utf-8")
     assert journal.is_file()
     instance["update_recovery_required"] = True
@@ -310,7 +310,7 @@ def test_update_refuses_instance_with_unresolved_journal(tmp_path, monkeypatch):
 def test_updater_refuses_direct_update_with_unresolved_journal(tmp_path):
     root = tmp_path / "minecraft"
     instance = _instance(root)
-    (root.parent / "update-journal.json").write_text("{}\n", encoding="utf-8")
+    (root / "update-journal.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(ModrinthPackUpdateError, match="recovered"):
         ModrinthPackUpdater(FakeImporter()).update(instance, root, tmp_path / "replacement.mrpack")
 
@@ -322,7 +322,7 @@ def test_update_journal_unlink_failure_marks_recovery_required(tmp_path, monkeyp
     class Updater:
         def update(self, instance, root, selected, **kwargs):
             instance.update(install_state="ready", ready=True, recovery_backup=str(tmp_path / "backup"))
-            (root.parent / "update-journal.json").write_text(
+            (root / "update-journal.json").write_text(
                 '{"backup": "' + str(tmp_path / "backup") + '"}\n', encoding="utf-8"
             )
             return {"backup": str(tmp_path / "backup")}
@@ -345,3 +345,30 @@ def test_update_journal_unlink_failure_marks_recovery_required(tmp_path, monkeyp
     assert instance["install_state"] == "failed"
     assert instance["ready"] is False
     window.close()
+
+
+def test_update_on_game_directory_keeps_journal_inside_and_never_touches_minecraft(tmp_path):
+    # Pack updates run against the game directory (the instance root). The journal and
+    # backups belong to that instance, and the minecraft/ install tree (libraries, assets,
+    # runtime) is neither copied into the backup nor removed by recovery.
+    root = tmp_path / "instance"
+    instance = _instance(root)
+    library = root / "minecraft" / "libraries" / "lib.jar"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"library")
+    updater = ModrinthPackUpdater(FakeImporter())
+
+    result = updater.update(instance, root, tmp_path / "new.mrpack", confirm_local_changes=lambda paths: True)
+
+    assert (root / "update-journal.json").is_file()
+    assert not (tmp_path / "update-journal.json").exists()
+    backup = Path(result["backup"])
+    assert backup.parent == root / "backups"
+    assert not (backup / "minecraft").exists()
+    assert (backup / "saves" / "world.txt").is_file()
+
+    updater.recover(instance, root)
+    assert library.read_bytes() == b"library"
+    assert (root / "mods" / "pack-old.jar").read_bytes() == b"old"
+    assert not (root / "mods" / "pack-new.jar").exists()
+    assert (root / "backups").is_dir()
