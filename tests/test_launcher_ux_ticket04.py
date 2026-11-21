@@ -55,13 +55,13 @@ def test_search_groups_duplicate_named_setups_by_stable_id_and_preserves_selecti
     window.show()
     _process(application, window)
     assert _items(window)[-2:] == [
-        ("Survival · alpha-1214-a1b2c3d4", "alpha-1214-a1b2c3d4"),
-        ("Survival · beta-1214-e5f6a7b8", "beta-1214-e5f6a7b8"),
+        ("Survival", "alpha-1214-a1b2c3d4"),
+        ("Survival (2)", "beta-1214-e5f6a7b8"),
     ]
     selected = window.setup_selector.findData("beta-1214-e5f6a7b8")
     window.setup_selector.setCurrentIndex(selected)
     window.setup_search_input.setText("does-not-exist")
-    assert window.selector_empty_label.isVisible()
+    assert not window.selector_empty_label.isHidden()
     assert window.setup_selector.currentData() == "beta-1214-e5f6a7b8"
     window.close()
 
