@@ -136,3 +136,21 @@ def test_folder_open_failure_reports_selected_directory(tmp_path, monkeypatch):
     assert "Could not open instance folder" in window.diagnostic_hint_label.text()
     assert str(window.store.instance_game_root(instance["id"])) in window.diagnostic_hint_label.text()
     window.close()
+
+
+def test_tools_column_widens_for_wider_platform_fonts(tmp_path, monkeypatch):
+    """CI fonts are wider than a desktop's; the tools column must grow, not clip."""
+    application, window = _window(tmp_path, monkeypatch)
+    window.install_optifine_button.setMinimumWidth(330)  # stand-in for a wider font
+    _create_instance(window, "Survival")
+    window.instances_nav_button.click()
+    window.resize(680, 420)
+    for _ in range(3):
+        application.processEvents()
+
+    tools = window.findChild(QScrollArea, "instanceToolsScroll")
+    tools.ensureWidgetVisible(window.install_optifine_button)
+    application.processEvents()
+    button = window.install_optifine_button
+    assert tools.viewport().rect().contains(button.mapTo(tools.viewport(), button.rect().bottomRight()))
+    window.close()

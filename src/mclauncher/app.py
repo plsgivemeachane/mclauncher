@@ -424,6 +424,7 @@ class LauncherWindow(QMainWindow):
         tools.setContentsMargins(18, 14, 18, 16)
         tools.setSpacing(8)
         tools_scroll.setWidget(tools_panel)
+        self._tools_scroll = tools_scroll
         instance_body.addWidget(tools_scroll, 3)
         legacy_layout.addLayout(instance_body, 1)
 
@@ -946,14 +947,16 @@ class LauncherWindow(QMainWindow):
         self._fit_library_column()
 
     def _fit_library_column(self) -> None:
-        """The library never scrolls sideways, so its column must be at least
-        as wide as its content; otherwise list rows and badges are clipped."""
-        panel = self._library_scroll.widget()
-        # Showing/hiding the import controls only invalidates the top layout;
-        # activate() re-measures the nested rows before we read the minimum.
-        panel.layout().activate()
-        self._library_scroll.setMinimumWidth(max(
-            260, panel.minimumSizeHint().width() + self._library_scroll.verticalScrollBar().sizeHint().width()))
+        """The library and tools columns never scroll sideways, so each must be
+        at least as wide as its content plus the vertical scroll bar; otherwise
+        rows and buttons are clipped when the platform font is wider."""
+        for scroll, floor in ((self._library_scroll, 260), (self._tools_scroll, 300)):
+            panel = scroll.widget()
+            # Showing/hiding controls only invalidates the top layout;
+            # activate() re-measures the nested rows before we read the minimum.
+            panel.layout().activate()
+            scroll.setMinimumWidth(max(
+                floor, panel.minimumSizeHint().width() + scroll.verticalScrollBar().sizeHint().width()))
         # Apply now rather than on the next pass, so the columns never overlap.
         self.instances_panel.layout().activate()
 
