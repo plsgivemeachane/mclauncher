@@ -108,14 +108,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # GitHub's notes generator returns HTTP 500 when it has to find the
-          # previous release itself, so name it explicitly when one exists.
+          # Write the notes here: GitHub's generate-notes API returns HTTP 500
+          # for this repository, and it would only produce this compare link.
           previous=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
-          set -- --generate-notes
-          if [ -n "$previous" ]; then
-            set -- "$@" --notes-start-tag "$previous"
-          fi
+          {
+            echo "Ubuntu 24.04 amd64 package. Install with:"
+            echo
+            echo '```sh'
+            echo "sudo apt install ./mclauncher_${VERSION}_amd64.deb"
+            echo '```'
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 dist/SHA256SUMS)\`"
+            if [ -n "$previous" ]; then
+              echo
+              echo "**Full Changelog**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$previous...v$VERSION"
+            fi
+          } > release-notes.md
           gh release create "v$VERSION" \
             "dist/mclauncher_${VERSION}_amd64.deb" dist/SHA256SUMS \
             dist/package-info.txt dist/package-contents.txt \
-            --target "$GITHUB_SHA" --title "mclauncher $VERSION" "$@"
+            --target "$GITHUB_SHA" --title "mclauncher $VERSION" --notes-file release-notes.md
