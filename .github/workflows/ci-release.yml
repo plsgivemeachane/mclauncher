@@ -124,7 +124,16 @@ jobs:
               echo "**Full Changelog**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$previous...v$VERSION"
             fi
           } > release-notes.md
+          # Push the tag with git first: creating it inside the release API
+          # call fails with a bare HTTP 500, while git reports a real reason.
+          # Re-runs keep an existing tag only if it already marks this commit.
+          if remote=$(git ls-remote --exit-code --tags origin "refs/tags/v$VERSION"); then
+            test "$(echo "$remote" | cut -f1)" = "$GITHUB_SHA"
+          else
+            git tag "v$VERSION" "$GITHUB_SHA"
+            git push origin "refs/tags/v$VERSION"
+          fi
           gh release create "v$VERSION" \
             "dist/mclauncher_${VERSION}_amd64.deb" dist/SHA256SUMS \
             dist/package-info.txt dist/package-contents.txt \
-            --target "$GITHUB_SHA" --title "mclauncher $VERSION" --notes-file release-notes.md
+            --verify-tag --title "mclauncher $VERSION" --notes-file release-notes.md
