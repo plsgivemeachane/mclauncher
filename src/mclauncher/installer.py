@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from . import __version__
 from .persistence import game_directory_for
+from .audit import log_banner
 
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
@@ -282,7 +283,9 @@ class DetachedMinecraftProcess(QObject):
         try:
             log_directory = working_directory / "logs"
             log_directory.mkdir(parents=True, exist_ok=True)
-            self._log_file = (log_directory / "minecraft.log").open("ab")
+            self._log_path = log_directory / "minecraft.log"
+            log_banner(self._log_path, "launch source=app")
+            self._log_file = self._log_path.open("ab")
             try:
                 self._process = subprocess.Popen(
                     command,
@@ -314,4 +317,5 @@ class DetachedMinecraftProcess(QObject):
         self._finished_reported = True
         self._poll_timer.stop()
         self._log_file.close()
+        log_banner(self._log_path, f"exit pid={self._process.pid} code={return_code}")
         self._on_finished(return_code, return_code != 0)

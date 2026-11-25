@@ -39,6 +39,24 @@ claude mcp add mclauncher -- "$PWD/.venv/bin/mclauncher-mcp"
 
 This repository also ships a project `.mcp.json`, so Claude Code started here offers the server automatically. For an HTTP endpoint instead of stdio, run `mclauncher-mcp --transport streamable-http --port 8765` (binds to `127.0.0.1`; there is no authentication, so do not expose it to a network). Installs and imports run as background jobs: tools return a job id to poll with `get_job`.
 
+## Audit journal
+
+Everything the launcher changes is appended to `~/.local/share/mclauncher/audit.jsonl`, one JSON event per line. Each event records the time, the `source` (`app`, `mcp`, or `control`), the process id, and the `action`:
+
+- `state_change`: a field-level before/after diff of every `state.json` save (settings, instances added, renamed, changed, or removed)
+- `delete_instance`: the instance record plus an inventory of its folder (worlds, mods, backups, file count, bytes), written before the folder is removed
+- `import_local_mod`, `toggle_mod`, `remove_mod`, `duplicate_instance`: file-level mod and instance operations
+- `game_launch`, `game_stop`, `game_exit`: process id, username, memory, exit code
+- `pack_update_backed_up`, `pack_update_applied`, `pack_update_failed`, `pack_update_rollback_failed`, `pack_update_recover`: modpack update lifecycle
+- `job_started`, `job_finished`, `mcp_call`: background jobs and every MCP tool call, refused ones included (successful status polls are skipped)
+- `app_start`, `app_close`, `state_load_failed`, `state_recover_defaults`
+
+The journal lives outside `instances/`, so it survives instance deletion. When it reaches 20 MB it is renamed to `audit-<timestamp>.jsonl`, and the launcher never deletes old journals. Each instance's `logs/minecraft.log` also gets a marker line at every launch and exit. To read the timeline:
+
+```sh
+jq -c '[.ts, .source, .action, (.name // .instance_id // .tool)]' ~/.local/share/mclauncher/audit*.jsonl
+```
+
 ## CI and releases
 
 Pull requests and pushes to `main` run the regression suite, compile checks, and shell syntax checks. After successful checks on `main`, CI reads `__version__` from `src/mclauncher/__init__.py`. If `v<version>` has no GitHub release yet, CI builds the `.deb`, checks its version and architecture, and publishes a release with the package, SHA-256 checksum, and package metadata. The first push publishes the current version automatically.

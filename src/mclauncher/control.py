@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .audit import compact_instance, inventory, log_banner
 from .identity import USERNAME_RE, local_identity
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .lifecycle import GameProcessRegistry
@@ -88,8 +89,9 @@ class LauncherController:
     def __init__(self, data_root: Path | str | None = None, *, installer=None, player=None,
                  game_registry=None, modrinth_importer=None, curseforge_importer=None,
                  popen: Callable[..., subprocess.Popen] = subprocess.Popen,
-                 run_jobs_inline: bool = False) -> None:
-        self.store = LauncherStore(data_root)
+                 run_jobs_inline: bool = False, audit_source: str = "control") -> None:
+        self.store = LauncherStore(data_root, audit_source=audit_source)
+        self.audit = self.store.audit
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
         self.registry = game_registry or GameProcessRegistry(self.store.root)
@@ -262,11 +264,17 @@ class LauncherController:
             instance_id = str(instance["id"])
             self._refuse_if_busy(instance_id)
             root = self.store.instance_root(instance_id)
+            self.audit.record("delete_instance", phase="started", instance_id=instance_id,
+                              name=instance.get("name"), instance=compact_instance(instance),
+                              folder=inventory(root))
             if root.exists():
                 try:
                     shutil.rmtree(root)
                 except OSError as error:
+                    self.audit.record("delete_instance", phase="failed", instance_id=instance_id,
+                                      error=str(error), folder_after=inventory(root))
                     raise ControlError(f"Could not delete instance folder: {error}") from error
+            self.audit.record("delete_instance", phase="folder_removed", instance_id=instance_id)
             self.state["instances"] = [item for item in self.state["instances"] if item.get("id") != instance_id]
             self.state["automatic_instances"] = {
                 version: value for version, value in self.state.get("automatic_instances", {}).items()
@@ -304,6 +312,7 @@ class LauncherController:
             job = Job(id=uuid.uuid4().hex[:12], kind=kind, instance_id=instance_id)
             self._jobs[job.id] = job
             self._busy_instances.add(instance_id)
+        self.audit.record("job_started", job_id=job.id, kind=kind, instance_id=instance_id)
 
         def run() -> None:
             try:
@@ -317,6 +326,9 @@ class LauncherController:
                 job.finished_at = time.time()
                 with self._lock:
                     self._busy_instances.discard(instance_id)
+                self.audit.record("job_finished", job_id=job.id, kind=kind, instance_id=instance_id,
+                                  status=job.status, message=job.message,
+                                  seconds=round(job.finished_at - job.started_at, 3))
 
         if self._run_jobs_inline:
             run()
@@ -486,15 +498,23 @@ class LauncherController:
                     instance, minecraft_root, name, local_identity(name), memory)
                 log_path = self._log_path(instance["id"])
                 log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_banner(log_path, f"launch source={self.audit.source} instance={instance['id']} "
+                                     f"name={instance.get('name')!r} username={name} memory_gib={memory}")
                 with log_path.open("ab") as log_file:
                     process = self._popen(command, cwd=str(game_directory), stdin=subprocess.DEVNULL,
                                           stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
             except Exception as error:
                 self.registry.release()
+                self.audit.record("game_launch", outcome="failed", instance_id=instance["id"],
+                                  name=instance.get("name"), error=str(error))
                 raise ControlError(f"Launch failed: {error}") from error
             if self.registry.remember(process.pid, instance["id"]) is None:
                 self.registry.release()
                 raise ControlError("Launch failed: could not verify the Minecraft process")
+            self.audit.record("game_launch", outcome="started", instance_id=instance["id"],
+                              name=instance.get("name"), pid=process.pid, username=name, memory_gib=memory,
+                              version=instance.get("version"), loader=instance.get("loader"),
+                              log=str(log_path), command=command)
             self._game = process
             self._game_instance_id = instance["id"]
             threading.Thread(target=self._watch_game, args=(process, instance["id"]), daemon=True).start()
@@ -511,6 +531,9 @@ class LauncherController:
                 self.registry.release()
             self.last_exit = {"instance_id": instance_id, "exit_code": exit_code, "crashed": exit_code != 0,
                               "finished_at": time.time()}
+        log_banner(self._log_path(instance_id), f"exit pid={process.pid} code={exit_code}")
+        self.audit.record("game_exit", instance_id=instance_id, pid=process.pid, exit_code=exit_code,
+                          crashed=exit_code != 0)
 
     def game_status(self) -> dict[str, Any]:
         record = self.registry.read()
@@ -529,6 +552,7 @@ class LauncherController:
             raise ControlError("No Minecraft game is running")
         pid = int(record["pid"])
         sig = signal.SIGKILL if force else signal.SIGTERM
+        self.audit.record("game_stop", pid=pid, instance_id=record.get("instance_id"), signal=sig.name)
         try:
             os.killpg(os.getpgid(pid), sig)
         except ProcessLookupError:

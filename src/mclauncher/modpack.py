@@ -280,8 +280,14 @@ class ModrinthPackUpdateError(ModrinthPackError):
 class ModrinthPackUpdater:
     """Stage a replacement pack, back up the live instance, then publish atomically."""
 
-    def __init__(self, importer: ModrinthPackImporter):
+    def __init__(self, importer: ModrinthPackImporter, audit=None):
         self.importer = importer
+        # Optional AuditLog; the owner (app or controller) attaches its own.
+        self.audit = audit
+
+    def _audit(self, action: str, **details) -> None:
+        if self.audit is not None:
+            self.audit.record(action, **details)
 
     # Entries of the game directory that a pack update never owns: the minecraft/
     # install tree (libraries, assets, runtime, versions), the update's own backups
@@ -478,6 +484,9 @@ class ModrinthPackUpdater:
             self._durable_tree(backup)
             self._fsync_file(backup_root)
             self._publish_journal(journal, journal_data)
+            self._audit("pack_update_backed_up", instance_id=instance.get("id"), name=instance.get("name"),
+                        archive=str(archive_path), release_id=release_id, backup=str(backup),
+                        local_files=local_names)
             progress("Backed up current instance", 0, 1)
             if cancel_event is not None and cancel_event.is_set():
                 raise ModrinthPackUpdateError("Modrinth pack update cancelled")
@@ -507,13 +516,25 @@ class ModrinthPackUpdater:
             )
             if release_id:
                 instance["pack_release_id"] = release_id
+            removed_files = sorted(old_files - set(metadata.get("installed_files", [])))
+            self._audit("pack_update_applied", instance_id=instance.get("id"), name=instance.get("name"),
+                        archive=str(archive_path), release_id=release_id, backup=str(backup),
+                        game_version=metadata.get("game_version"), loader=metadata.get("loader"),
+                        loader_version=metadata.get("loader_version"), removed_files=removed_files,
+                        installed_file_count=len(metadata.get("installed_files", [])))
             return {"metadata": metadata, "backup": str(backup), "local_files": local_names}
         except Exception as error:
+            self._audit("pack_update_failed", instance_id=instance.get("id"), name=instance.get("name"),
+                        archive=str(archive_path), error=f"{type(error).__name__}: {error}",
+                        backup=str(backup) if backup.is_dir() else None,
+                        rolling_back=backup.is_dir())
             if backup.is_dir():
                 try:
                     self._restore_game_directory(backup, root)
                     self._durable_restored(root)
                 except OSError as recovery_error:
+                    self._audit("pack_update_rollback_failed", instance_id=instance.get("id"),
+                                backup=str(backup), error=str(recovery_error))
                     raise ModrinthPackUpdateError(
                         f"Update failed and recovery failed: {recovery_error}"
                     ) from error
@@ -549,6 +570,9 @@ class ModrinthPackUpdater:
             journal_data = json.loads(journal.read_text(encoding="utf-8")) if journal.is_file() else {}
         except (OSError, json.JSONDecodeError):
             journal_data = {}
+        self._audit("pack_update_recover", instance_id=instance.get("id"), name=instance.get("name"),
+                    backup=str(backup), journal={key: value for key, value in journal_data.items() if key != "previous_instance"}
+                    if isinstance(journal_data, dict) else None)
         self._restore_game_directory(backup, root)
         self._durable_restored(root)
         previous_instance = journal_data.get("previous_instance") if isinstance(journal_data, dict) else None

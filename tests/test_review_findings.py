@@ -120,7 +120,11 @@ def test_detached_process_writes_combined_output_to_instance_log(tmp_path):
     )
     process._process.wait()
     process._poll()
-    assert (tmp_path / "logs" / "minecraft.log").read_text() == "outerr"
+    lines = (tmp_path / "logs" / "minecraft.log").read_text().splitlines()
+    # Game output is framed by launcher-written launch and exit markers.
+    assert [line for line in lines if line][1] == "outerr"
+    assert "launch source=app" in lines[1]
+    assert f"exit pid={process._process.pid} code=0" in lines[-1]
     assert seen == [(0, False)]
 
 

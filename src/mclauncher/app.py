@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .persistence import LauncherStore, game_directory_for
+from .audit import compact_instance, file_facts, inventory
 from .installer import MinecraftInstaller, MinecraftPlayer, validate_version_id
 from .memory import default_memory_gib, validate_memory_gib, whole_physical_memory_gib
 from .lifecycle import GameProcessRegistry
@@ -74,6 +75,11 @@ PACK_DETAILS_PROMPT = "Pick a pack from the results to see what it includes."
 def _release_discovery_worker(worker: QThread) -> None:
     _ACTIVE_DISCOVERY_WORKERS.discard(worker)
     worker.deleteLater()
+
+
+def _small_mod(mod: dict) -> dict:
+    return {key: mod.get(key) for key in ("id", "filename", "path", "enabled", "source", "source_path", "version")
+            if key in mod}
 
 
 class MinecraftHomePanel(QFrame):
@@ -143,6 +149,8 @@ class LauncherWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
         self.store = LauncherStore(data_root)
+        self.audit = self.store.audit
+        self.audit.record("app_start", version=__version__, data_root=str(self.store.root))
         self._installer_injected = installer is not None
         self.installer = installer or MinecraftInstaller()
         self.player = player or MinecraftPlayer()
@@ -161,6 +169,9 @@ class LauncherWindow(QMainWindow):
         self._curseforge_importer_injected = curseforge_importer is not None
         self.curseforge_updater = curseforge_updater or ModrinthPackUpdater(self.curseforge_importer)
         self._curseforge_updater_injected = curseforge_updater is not None
+        for updater in (self.modrinth_updater, self.curseforge_updater):
+            if hasattr(updater, "audit") and getattr(updater, "audit") is None:
+                updater.audit = self.audit
         self.modrinth_catalog = modrinth_catalog or ModrinthCatalog()
         self._catalog_injected = modrinth_catalog is not None
         self._catalog_worker = None
@@ -2541,8 +2552,11 @@ class LauncherWindow(QMainWindow):
         try:
             shutil.copytree(source_root, destination_root)
         except OSError as error:
+            self.audit.record("duplicate_instance", outcome="failed", source_id=source_id, error=str(error))
             self.diagnostic_hint_label.setText(f"Could not duplicate instance: {error}")
             return
+        self.audit.record("duplicate_instance", outcome="copied", source_id=source_id,
+                          destination_id=destination_id, folder=inventory(destination_root))
         duplicate = dict(instance)
         duplicate["id"] = destination_id
         duplicate["name"] = self._unique_instance_name(f"Copy of {instance.get('name', 'Unnamed setup')}")
@@ -2569,10 +2583,14 @@ class LauncherWindow(QMainWindow):
         instance_id = str(instance["id"])
         try:
             root = self.store.instance_root(instance_id)
+            self.audit.record("delete_instance", phase="started", instance_id=instance_id, name=name,
+                              instance=compact_instance(instance), folder=inventory(root))
             shutil.rmtree(root)
         except OSError as error:
+            self.audit.record("delete_instance", phase="failed", instance_id=instance_id, error=str(error))
             self.diagnostic_hint_label.setText(f"Could not delete instance: {error}")
             return
+        self.audit.record("delete_instance", phase="folder_removed", instance_id=instance_id)
         self.state["instances"] = [item for item in self.state["instances"] if item.get("id") != instance_id]
         self.state["automatic_instances"] = {
             version: value for version, value in self.state.get("automatic_instances", {}).items()
@@ -2997,6 +3015,8 @@ class LauncherWindow(QMainWindow):
         try:
             target = copy_mod_to_instance(source, self.store.instance_game_root(instance["id"]))
         except (OSError, ValueError) as error:
+            self.audit.record("import_local_mod", outcome="failed", instance_id=instance["id"],
+                              source_path=str(source), error=str(error))
             self.mods_warning_label.setText(f"Could not import {source.name}: {error}")
             return
         mod = dict(metadata)
@@ -3004,6 +3024,9 @@ class LauncherWindow(QMainWindow):
                     "enabled": True, "source": "local", "source_path": str(source)})
         instance.setdefault("mods", []).append(mod)
         instance["modified"] = True
+        self.audit.record("import_local_mod", outcome="copied", instance_id=instance["id"],
+                          source_path=str(source), target=file_facts(target),
+                          compatible=metadata.get("compatible"))
         self.store.save(self.state)
         self._refresh_mods_panel()
         if metadata.get("compatible") is None:
@@ -3026,6 +3049,8 @@ class LauncherWindow(QMainWindow):
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             if current.exists():
+                self.audit.record("toggle_mod", instance_id=instance["id"], mod=mod.get("filename"),
+                                  enabled=enabled, source=str(current), destination=str(destination))
                 current.replace(destination)
             else:
                 self.mods_warning_label.setText("The selected mod file is missing; restore it before enabling it.")
@@ -3045,9 +3070,13 @@ class LauncherWindow(QMainWindow):
             return
         mod = instance.get("mods", [])[row]
         root = self.store.instance_game_root(instance["id"])
+        target = root / str(mod.get("path", ""))
+        self.audit.record("remove_mod", phase="started", instance_id=instance["id"], mod=_small_mod(mod),
+                          file=file_facts(target))
         try:
-            (root / str(mod.get("path", ""))).unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
         except OSError as error:
+            self.audit.record("remove_mod", phase="failed", instance_id=instance["id"], error=str(error))
             self.mods_warning_label.setText(f"Could not remove mod: {error}")
             return
         instance["mods"] = [item for item in instance.get("mods", []) if item is not mod]
@@ -3566,6 +3595,8 @@ class LauncherWindow(QMainWindow):
             self._operation_username = None
             self._operation_memory_gib = None
             self._set_session_controls_locked(False)
+            self.audit.record("game_launch", outcome="failed", instance_id=instance.get("id"),
+                              name=instance.get("name"), error=str(error))
             self.instance_status_label.setText(f"Play failed: {error}")
             self._record_diagnostic(instance, f"Play failed: {error}")
             self.diagnostic_hint_label.setText("Install or retry this instance, then try Play again.")
@@ -3588,6 +3619,9 @@ class LauncherWindow(QMainWindow):
                 self._set_session_controls_locked(False)
                 self._refresh_play_button()
                 return
+        self.audit.record("game_launch", outcome="started", instance_id=instance["id"],
+                          name=instance.get("name"), pid=process_id, username=username, memory_gib=memory_gib,
+                          version=instance.get("version"), loader=instance.get("loader"))
         if self.instance_status_label.text().startswith("Starting"):
             self._game_started(instance)
 
@@ -3599,6 +3633,8 @@ class LauncherWindow(QMainWindow):
     def _game_finished(self, instance: dict, exit_code: int, crashed: bool) -> None:
         if self.game_instance is not None and self.game_instance.get("id") != instance.get("id"):
             return
+        self.audit.record("game_exit", instance_id=instance.get("id"), name=instance.get("name"),
+                          pid=(self.game_record or {}).get("pid"), exit_code=exit_code, crashed=crashed)
         self.game_process = None
         self.game_instance = None
         self.last_game_instance = instance
@@ -3632,6 +3668,12 @@ class LauncherWindow(QMainWindow):
         self.store.save(self.state)
 
     def closeEvent(self, event) -> None:
+        self.audit.record(
+            "app_close",
+            installing_instance_id=(self.installing_instance or {}).get("id") if self.install_worker else None,
+            game_running=self.game_process is not None,
+            game_instance_id=(self.game_instance or {}).get("id"),
+        )
         if self.install_worker is not None and self.installing_instance is not None:
             instance = self.installing_instance
             resolved_version = getattr(self.install_worker, "resolved_version", None)

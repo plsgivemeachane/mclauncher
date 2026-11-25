@@ -25,7 +25,12 @@ launch_game installs a not-yet-ready vanilla instance first and returns that job
 """
 
 
-def _tool(server: MCPServer, **options) -> Callable:
+# Status polls an agent repeats every few seconds while waiting on a job; a
+# successful poll changes nothing, so only its failures are journaled.
+_UNJOURNALED_POLLS = frozenset({"get_job", "list_jobs", "game_status", "launcher_status"})
+
+
+def _tool(server: MCPServer, audit=None, **options) -> Callable:
     """Register a tool whose failures reach the model with their real message.
 
     MCP 2.x hides unexpected exception text from clients; this server only runs
@@ -35,10 +40,22 @@ def _tool(server: MCPServer, **options) -> Callable:
     def decorate(function: Callable) -> Callable:
         @functools.wraps(function)
         def wrapper(*args, **kwargs):
+            # Every tool call is journaled with its arguments and outcome, so an
+            # agent's actions (including refused ones) can be told apart from the user's.
+            call = {"tool": function.__name__, "args": list(args), "kwargs": kwargs}
             try:
-                return function(*args, **kwargs)
+                result = function(*args, **kwargs)
             except (ControlError, OSError, RuntimeError, ValueError) as error:
+                if audit is not None:
+                    audit.record("mcp_call", **call, outcome="error", error=str(error) or type(error).__name__)
                 raise ToolError(str(error) or type(error).__name__) from error
+            except Exception as error:
+                if audit is not None:
+                    audit.record("mcp_call", **call, outcome="crash", error=f"{type(error).__name__}: {error}")
+                raise
+            if audit is not None and function.__name__ not in _UNJOURNALED_POLLS:
+                audit.record("mcp_call", **call, outcome="ok")
+            return result
 
         server.tool(**options)(wrapper)
         return function
@@ -47,9 +64,9 @@ def _tool(server: MCPServer, **options) -> Callable:
 
 
 def build_server(controller: LauncherController | None = None) -> MCPServer:
-    control = controller or LauncherController()
+    control = controller or LauncherController(audit_source="mcp")
     server = MCPServer(name="mclauncher", instructions=INSTRUCTIONS, version=__version__)
-    tool = functools.partial(_tool, server)
+    tool = functools.partial(_tool, server, getattr(control, "audit", None))
 
     @tool()
     def launcher_status() -> dict[str, Any]:
@@ -154,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
-    server = build_server(LauncherController(args.data_root))
+    server = build_server(LauncherController(args.data_root, audit_source="mcp"))
     if args.transport == "stdio":
         server.run("stdio")
     else:

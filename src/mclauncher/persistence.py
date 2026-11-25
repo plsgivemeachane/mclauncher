@@ -11,6 +11,8 @@ import fcntl
 from pathlib import Path
 from typing import Any
 
+from .audit import AuditLog, diff_state
+
 
 def game_directory_for(minecraft_directory: Path | str) -> Path:
     """The game directory for an instance's minecraft/ install folder.
@@ -24,7 +26,7 @@ def game_directory_for(minecraft_directory: Path | str) -> Path:
 class LauncherStore:
     """Persist launcher-owned data below one dedicated data root."""
 
-    def __init__(self, data_root: Path | str | None = None) -> None:
+    def __init__(self, data_root: Path | str | None = None, *, audit_source: str = "app") -> None:
         if data_root is None:
             data_root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "mclauncher"
         self.root = Path(data_root).expanduser()
@@ -37,6 +39,7 @@ class LauncherStore:
         self.recovery_backup: Path | None = None
         self._baseline: dict[str, Any] = {}
         self.state_lock_path = self.root / "state.lock"
+        self.audit = AuditLog(self.root, source=audit_source)
 
     @staticmethod
     def _defaults() -> dict[str, Any]:
@@ -69,6 +72,7 @@ class LauncherStore:
         self.recovery_required = True
         self.recovery_backup = backup
         self.load_error = f"Launcher state could not be loaded: {reason}.{suffix} Review the backup, then choose Recover defaults."
+        self.audit.record("state_load_failed", reason=reason, backup=str(backup) if backup else None)
         return self._defaults()
 
     def load(self) -> dict[str, Any]:
@@ -146,6 +150,11 @@ class LauncherStore:
                 os.fsync(directory)
             finally:
                 os.close(directory)
+            # Journaled while the state lock is held, so concurrent writers'
+            # diffs are recorded in the same order their saves landed.
+            changes = diff_state(latest, merged)
+            if changes:
+                self.audit.record("state_change", **changes)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         old_instances = {item.get("id"): item for item in state.get("instances", []) if isinstance(item, dict)}
         for item in merged.get("instances", []):
@@ -230,6 +239,7 @@ class LauncherStore:
     def recover_defaults(self) -> None:
         if self.recovery_backup is None or not self.recovery_backup.is_file():
             raise RuntimeError("The original launcher state was not backed up; recovery was refused")
+        self.audit.record("state_recover_defaults", corrupt_backup=str(self.recovery_backup))
         self.state_path.unlink(missing_ok=True)
         self.recovery_required = False
         self.load_error = ""
