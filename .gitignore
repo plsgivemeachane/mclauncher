@@ -4,3 +4,6 @@
 /packaging/mclauncher.dist/
 /packaging/entrypoint.dist/
 /packaging/pysidedeploy.spec
+
+# Local UI audit output (screenshots, probes, reports)
+/.scratch/launcher-ui-audit/
