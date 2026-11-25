@@ -108,7 +108,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # GitHub's notes generator returns HTTP 500 when it has to find the
+          # previous release itself, so name it explicitly when one exists.
+          previous=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          set -- --generate-notes
+          if [ -n "$previous" ]; then
+            set -- "$@" --notes-start-tag "$previous"
+          fi
           gh release create "v$VERSION" \
             "dist/mclauncher_${VERSION}_amd64.deb" dist/SHA256SUMS \
             dist/package-info.txt dist/package-contents.txt \
-            --target "$GITHUB_SHA" --title "mclauncher $VERSION" --generate-notes
+            --target "$GITHUB_SHA" --title "mclauncher $VERSION" "$@"
