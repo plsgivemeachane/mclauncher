@@ -24,6 +24,14 @@ import java.util.concurrent.Executors;
  * session host at a loopback relay that accepts the join report and forwards
  * every other request (profiles, skins, blocked servers) to Mojang unchanged.
  * Whether the player gets in is still the server's decision.
+ *
+ * The services host goes through the same relay under {@link #SERVICES_PREFIX}.
+ * authlib fetches the Services public keys once at startup and retries only a
+ * day later, so a single failed lookup leaves the game unable to verify other
+ * players' signed chat. The client then drops those messages from its
+ * last-seen list and the server kicks it with "Chat message validation
+ * failure" the next time it chats. When the live fetch fails the relay
+ * answers with the key set bundled in this jar.
  */
 public final class OfflineSessionAgent {
     static final String SESSION_HOST = "https://sessionserver.mojang.com";
@@ -32,6 +40,14 @@ public final class OfflineSessionAgent {
     static final String ACCOUNT_HOST = "https://api.mojang.com";
     static final String JOIN_PATH = "/session/minecraft/join";
     static final String LOOPBACK_HOST = "127.0.0.1";
+    static final String SERVICES_PREFIX = "/services";
+    static final String PUBLIC_KEYS_PATH = "/publickeys";
+    static final String BUNDLED_PUBLIC_KEYS = "publickeys.json";
+    // authlib waits about 15 s for its own request, so give up upstream
+    // sooner and still have time to answer with the bundled keys.
+    static final int PUBLIC_KEYS_TIMEOUT_MS = 8000;
+    static final int FORWARD_TIMEOUT_MS = 15000;
+    static final String[] FORWARDED_HEADERS = {"Content-Type", "Accept", "User-Agent", "Authorization"};
 
     private OfflineSessionAgent() {
     }
@@ -71,8 +87,9 @@ public final class OfflineSessionAgent {
             return;
         }
         // authlib only honours custom hosts when the whole set is present.
-        System.setProperty("minecraft.api.session.host", "http://" + LOOPBACK_HOST + ":" + port[0]);
-        System.setProperty("minecraft.api.services.host", SERVICES_HOST);
+        String relay = "http://" + LOOPBACK_HOST + ":" + port[0];
+        System.setProperty("minecraft.api.session.host", relay);
+        System.setProperty("minecraft.api.services.host", relay + SERVICES_PREFIX);
         System.setProperty("minecraft.api.auth.host", AUTH_HOST);
         System.setProperty("minecraft.api.account.host", ACCOUNT_HOST);
     }
@@ -102,7 +119,19 @@ public final class OfflineSessionAgent {
                 exchange.sendResponseHeaders(204, -1);
                 return;
             }
-            forward(exchange, method, uri, body);
+            String path = uri.getRawPath();
+            String query = uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery();
+            if (path.equals(SERVICES_PREFIX) || path.startsWith(SERVICES_PREFIX + "/")) {
+                String servicesPath = path.substring(SERVICES_PREFIX.length());
+                String upstream = servicesUpstream();
+                if ("GET".equals(method) && PUBLIC_KEYS_PATH.equals(servicesPath)) {
+                    servePublicKeys(exchange, upstream + servicesPath + query);
+                    return;
+                }
+                send(exchange, forward(exchange, method, upstream + servicesPath + query, body, FORWARD_TIMEOUT_MS));
+                return;
+            }
+            send(exchange, forward(exchange, method, SESSION_HOST + path + query, body, FORWARD_TIMEOUT_MS));
         } catch (IOException error) {
             exchange.sendResponseHeaders(502, -1);
         } finally {
@@ -110,13 +139,68 @@ public final class OfflineSessionAgent {
         }
     }
 
-    private static void forward(HttpExchange exchange, String method, URI uri, byte[] body) throws IOException {
-        String target = SESSION_HOST + uri.getRawPath() + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery());
+    /** The real services host; tests point it somewhere unreachable. */
+    static String servicesUpstream() {
+        return System.getProperty("mclauncher.agent.servicesUpstream", SERVICES_HOST);
+    }
+
+    /** Prefer Mojang's live key set; fall back to the bundled one when it is unreachable. */
+    private static void servePublicKeys(HttpExchange exchange, String target) throws IOException {
+        Upstream live = null;
+        try {
+            live = forward(exchange, "GET", target, new byte[0], PUBLIC_KEYS_TIMEOUT_MS);
+        } catch (IOException error) {
+            System.err.println("[mclauncher] Services public keys unreachable (" + error + "); using bundled keys");
+        }
+        if (live != null && live.status == 200 && live.body.length > 0) {
+            send(exchange, live);
+            return;
+        }
+        if (live != null) {
+            System.err.println("[mclauncher] Services public keys returned HTTP " + live.status + "; using bundled keys");
+        }
+        InputStream bundled = OfflineSessionAgent.class.getResourceAsStream(BUNDLED_PUBLIC_KEYS);
+        if (bundled == null) {
+            if (live != null) {
+                send(exchange, live);
+            } else {
+                exchange.sendResponseHeaders(502, -1);
+            }
+            return;
+        }
+        send(exchange, new Upstream(200, "application/json", readAll(bundled)));
+    }
+
+    static final class Upstream {
+        final int status;
+        final String contentType;
+        final byte[] body;
+
+        Upstream(int status, String contentType, byte[] body) {
+            this.status = status;
+            this.contentType = contentType;
+            this.body = body;
+        }
+    }
+
+    private static void send(HttpExchange exchange, Upstream response) throws IOException {
+        if (response.contentType != null) {
+            exchange.getResponseHeaders().set("Content-Type", response.contentType);
+        }
+        boolean empty = response.body.length == 0 || response.status == 204 || response.status == 304;
+        exchange.sendResponseHeaders(response.status, empty ? -1 : response.body.length);
+        if (!empty) {
+            exchange.getResponseBody().write(response.body);
+        }
+    }
+
+    private static Upstream forward(HttpExchange exchange, String method, String target, byte[] body, int timeoutMs)
+            throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(target).openConnection();
-        connection.setConnectTimeout(15000);
-        connection.setReadTimeout(15000);
+        connection.setConnectTimeout(timeoutMs);
+        connection.setReadTimeout(timeoutMs);
         connection.setRequestMethod(method);
-        for (String header : new String[] {"Content-Type", "Accept", "User-Agent"}) {
+        for (String header : FORWARDED_HEADERS) {
             String value = exchange.getRequestHeaders().getFirst(header);
             if (value != null) {
                 connection.setRequestProperty(header, value);
@@ -131,15 +215,7 @@ public final class OfflineSessionAgent {
         int status = connection.getResponseCode();
         InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
         byte[] response = stream == null ? new byte[0] : readAll(stream);
-        String contentType = connection.getContentType();
-        if (contentType != null) {
-            exchange.getResponseHeaders().set("Content-Type", contentType);
-        }
-        boolean empty = response.length == 0 || status == 204 || status == 304;
-        exchange.sendResponseHeaders(status, empty ? -1 : response.length);
-        if (!empty) {
-            exchange.getResponseBody().write(response);
-        }
+        return new Upstream(status, connection.getContentType(), response);
     }
 
     private static byte[] readAll(InputStream stream) throws IOException {

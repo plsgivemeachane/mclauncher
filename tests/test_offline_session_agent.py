@@ -76,5 +76,43 @@ def test_agent_accepts_join_and_lets_game_exit(tmp_path, jvm_flags):
 
     assert result.returncode == 0, result.stderr
     assert "host=http://127.0.0.1:" in result.stdout
-    assert "services=https://api.minecraftservices.com" in result.stdout
+    assert "services=http://127.0.0.1:" in result.stdout
+    assert result.stdout.split("services=")[1].split()[0].endswith("/services")
     assert "join=204" in result.stdout
+
+
+# Stands in for authlib's startup key fetch: GET <services host>/publickeys.
+KEYS_PROBE = """
+import java.io.*;
+import java.net.*;
+public class KeysProbe {
+    public static void main(String[] args) throws Exception {
+        String host = System.getProperty("minecraft.api.services.host");
+        HttpURLConnection c = (HttpURLConnection) new URL(host + "/publickeys").openConnection();
+        System.out.println("status=" + c.getResponseCode());
+        BufferedReader in = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
+        StringBuilder body = new StringBuilder();
+        for (String line; (line = in.readLine()) != null;) body.append(line);
+        System.out.println("body=" + body);
+    }
+}
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("java") and shutil.which("javac")), reason="needs a JDK")
+def test_agent_serves_bundled_public_keys_when_services_unreachable(tmp_path):
+    """A failed key fetch leaves signed chat unverifiable and gets the player kicked."""
+    (tmp_path / "KeysProbe.java").write_text(KEYS_PROBE, encoding="utf-8")
+    subprocess.run(["javac", "KeysProbe.java"], cwd=tmp_path, check=True)
+
+    result = subprocess.run(
+        ["java", "-Dmclauncher.agent.servicesUpstream=http://127.0.0.1:1",
+         f"-javaagent:{AGENT}", "-cp", ".", "KeysProbe"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "status=200" in result.stdout
+    assert "profilePropertyKeys" in result.stdout
+    assert "playerCertificateKeys" in result.stdout
+    assert "using bundled keys" in result.stderr
